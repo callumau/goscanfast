@@ -1,0 +1,26 @@
+# Binaries
+bin/
+build/
+*.exe
+*-amd64
+*-arm64
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Output files from scans
+*.csv
+*.json
+
+# Go
+vendor/
+go.work
+go.work.sum
+*.test
+*.out
