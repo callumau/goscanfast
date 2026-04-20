@@ -5,3 +5,11 @@ type Result struct {
 	Hostname string
 	Ports    []int
 }
+
+type SMBResult struct {
+	IP       string
+	Hostname string
+	Share    string
+	Path     string
+	Type     string // "Directory" or "File"
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -18,8 +19,10 @@ type Engine struct {
 	Exclude     []string
 	Ports       []int
 	Concurrency int
+	PortConcurrency int
 	Timeout     time.Duration
 	Writer      export.Writer
+	SMBWriter   export.SMBWriter
 	Reporter    Reporter
 	RateLimit   int
 }
@@ -32,6 +35,64 @@ type Reporter interface {
 	OnPortOpen(ip string, port int)
 	OnResult(result models.Result)
 	OnDone()
+}
+
+type MultiReporter []Reporter
+
+func (m MultiReporter) OnStart(total uint64) {
+	for _, r := range m {
+		if r != nil {
+			r.OnStart(total)
+		}
+	}
+}
+
+func (m MultiReporter) OnHostEnqueued() {
+	for _, r := range m {
+		if r != nil {
+			r.OnHostEnqueued()
+		}
+	}
+}
+
+func (m MultiReporter) OnHostStart(ip string) {
+	for _, r := range m {
+		if r != nil {
+			r.OnHostStart(ip)
+		}
+	}
+}
+
+func (m MultiReporter) OnHostDone() {
+	for _, r := range m {
+		if r != nil {
+			r.OnHostDone()
+		}
+	}
+}
+
+func (m MultiReporter) OnPortOpen(ip string, port int) {
+	for _, r := range m {
+		if r != nil {
+			r.OnPortOpen(ip, port)
+		}
+	}
+}
+
+func (m MultiReporter) OnResult(result models.Result) {
+	for _, r := range m {
+		if r != nil {
+			r.OnResult(result)
+		}
+	}
+}
+
+func (m MultiReporter) OnDone() {
+	for _, r := range m {
+		if r != nil {
+			r.OnDone()
+		}
+	}
 }
 
 func (e *Engine) Run() error {
@@ -64,7 +125,10 @@ func (e *Engine) Run() error {
 		defer ticker.Stop()
 	}
 
+	// Pre-spawn workers
 	var wg sync.WaitGroup
+	var smbWG sync.WaitGroup
+
 	for i := 0; i < e.Concurrency; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -76,14 +140,30 @@ func (e *Engine) Run() error {
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
-				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout)
+				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)))
 				if len(openPorts) == 0 {
 					if e.Reporter != nil {
 						e.Reporter.OnHostDone()
 					}
 					continue
 				}
+
 				hostname := lookupHostname(ip.String())
+
+				// Check for SMB port 445
+				if e.SMBWriter != nil {
+					for _, p := range openPorts {
+						if p == 445 {
+							smbWG.Add(1)
+							go func(targetIP, targetHostname string) {
+								defer smbWG.Done()
+								EnumSMB(ctx, targetIP, targetHostname, e.SMBWriter, e.Timeout)
+							}(ip.String(), hostname)
+							break
+						}
+					}
+				}
+
 				result := models.Result{
 					IP:       ip.String(),
 					Hostname: hostname,
@@ -114,6 +194,7 @@ func (e *Engine) Run() error {
 		}
 	}()
 
+	// Feeder
 	for ip := range ips {
 		jobs <- ip
 		if e.Reporter != nil {
@@ -124,21 +205,60 @@ func (e *Engine) Run() error {
 	wg.Wait()
 	close(results)
 	writerWG.Wait()
+
+	// Wait for SMB tasks to finish
+	smbWG.Wait()
+
 	if e.Reporter != nil {
 		e.Reporter.OnDone()
 	}
 	return nil
 }
 
-func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration) []int {
-	open := make([]int, 0)
-	for _, port := range ports {
-		portCtx, cancel := context.WithTimeout(ctx, timeout)
-		if ScanPort(portCtx, ip, port, timeout) {
-			open = append(open, port)
-		}
-		cancel()
+func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, portConcurrency int) []int {
+	if len(ports) == 0 {
+		return nil
 	}
+	if portConcurrency <= 0 || portConcurrency == 1 {
+		open := make([]int, 0)
+		for _, port := range ports {
+			portCtx, cancel := context.WithTimeout(ctx, timeout)
+			if ScanPort(portCtx, ip, port, timeout) {
+				open = append(open, port)
+			}
+			cancel()
+		}
+		sort.Ints(open)
+		return open
+	}
+
+	if portConcurrency > len(ports) {
+		portConcurrency = len(ports)
+	}
+
+	open := make([]int, 0, len(ports))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, portConcurrency)
+
+	for _, port := range ports {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			portCtx, cancel := context.WithTimeout(ctx, timeout)
+			if ScanPort(portCtx, ip, p, timeout) {
+				mu.Lock()
+				open = append(open, p)
+				mu.Unlock()
+			}
+			cancel()
+		}(port)
+	}
+
+	wg.Wait()
 	sort.Ints(open)
 	return open
 }
@@ -149,4 +269,33 @@ func lookupHostname(ip string) string {
 		return ""
 	}
 	return strings.TrimSuffix(addrs[0], ".")
+}
+
+func resolvedPortConcurrency(requested int, portsCount int) int {
+	if portsCount <= 0 {
+		return 0
+	}
+	if requested > 0 {
+		if requested > portsCount {
+			return portsCount
+		}
+		return requested
+	}
+
+	cpu := runtime.GOMAXPROCS(0)
+	if cpu <= 0 {
+		cpu = 1
+	}
+	maxByCPU := cpu * 4
+	maxByPorts := portsCount
+	if maxByCPU < 1 {
+		maxByCPU = 1
+	}
+	if maxByPorts < 1 {
+		maxByPorts = 1
+	}
+	if maxByCPU > maxByPorts {
+		return maxByPorts
+	}
+	return maxByCPU
 }

@@ -23,6 +23,7 @@ var (
 	flagTUI         bool
 	flagRate        int
 	flagTargets     string
+	flagPortConcurrency int
 )
 
 var rootCmd = &cobra.Command{
@@ -53,7 +54,28 @@ var rootCmd = &cobra.Command{
 		}
 		defer writer.Close()
 
-		var reporter scanner.Reporter
+		var smbWriter export.SMBWriter
+		for _, p := range ports {
+			if p == 445 {
+				var err error
+				smbWriter, err = export.NewSMBCSVWriter("smb-results.csv")
+				if err != nil {
+					return fmt.Errorf("failed to create smb-results.csv: %w", err)
+				}
+				defer smbWriter.Close()
+				break
+			}
+		}
+
+		activityLogger, err := scanner.NewActivityLogger("activity.log", cidrs)
+		if err != nil {
+			return fmt.Errorf("failed to create activity.log: %w", err)
+		}
+		defer activityLogger.Close()
+
+		var reporters scanner.MultiReporter
+		reporters = append(reporters, activityLogger)
+
 		var tuiRunner *tui.Runner
 		if flagTUI {
 			if flagOutput == "" {
@@ -68,7 +90,7 @@ var rootCmd = &cobra.Command{
 					Total:       total,
 					Concurrency: flagConcurrency,
 				})
-				reporter = tuiRunner.Reporter()
+				reporters = append(reporters, tuiRunner.Reporter())
 				if err := tuiRunner.Start(); err != nil {
 					return err
 				}
@@ -77,14 +99,16 @@ var rootCmd = &cobra.Command{
 		}
 
 		engine := scanner.Engine{
-			CIDRs:       cidrs,
-			Exclude:     excludes,
-			Ports:       ports,
-			Concurrency: flagConcurrency,
-			Timeout:     flagTimeout,
-			Writer:      writer,
-			Reporter:    reporter,
-			RateLimit:   flagRate,
+			CIDRs:           cidrs,
+			Exclude:         excludes,
+			Ports:           ports,
+			Concurrency:     flagConcurrency,
+			PortConcurrency: flagPortConcurrency,
+			Timeout:         flagTimeout,
+			Writer:          writer,
+			SMBWriter:       smbWriter,
+			Reporter:        reporters,
+			RateLimit:       flagRate,
 		}
 
 		return engine.Run()
@@ -108,6 +132,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", true, "Show TUI progress (requires --output)")
 	rootCmd.Flags().IntVar(&flagRate, "rate", 1024, "Max scans per second (hosts/sec)")
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
+	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
 
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)

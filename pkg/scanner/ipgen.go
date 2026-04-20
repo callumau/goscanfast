@@ -3,6 +3,8 @@ package scanner
 import (
 	"fmt"
 	"net"
+	"sort"
+	"sync"
 )
 
 type cidrBlock struct {
@@ -94,6 +96,13 @@ func GenerateIPsMulti(cidrs []string, excludes []string) (<-chan net.IP, error) 
 	if len(cidrs) == 0 {
 		return nil, fmt.Errorf("no CIDRs provided")
 	}
+
+	// Normalize CIDRs to avoid duplicates and overlapping ranges
+	normalized, err := normalizeCIDRs(cidrs)
+	if err != nil {
+		return nil, err
+	}
+
 	excludeBlocks, err := parseCIDRList(excludes)
 	if err != nil {
 		return nil, err
@@ -101,40 +110,76 @@ func GenerateIPsMulti(cidrs []string, excludes []string) (<-chan net.IP, error) 
 	ch := make(chan net.IP, 1024)
 	go func() {
 		defer close(ch)
-		for _, cidr := range cidrs {
-			_, ipnet, err := net.ParseCIDR(cidr)
-			if err != nil {
-				continue
-			}
-			baseIP := ipnet.IP.To4()
-			if baseIP == nil {
-				continue
-			}
-			mask := net.IP(ipnet.Mask).To4()
-			if mask == nil {
-				continue
-			}
+		var wg sync.WaitGroup
+		for _, cidr := range normalized {
+			baseIP := cidr.IP.To4()
+			mask := net.IP(cidr.Mask).To4()
 			start := ipToUint32(baseIP)
 			maskInt := ipToUint32(mask)
 			end := start | ^maskInt
-			for ip := start; ; ip++ {
-				skipped := false
-				for _, block := range excludeBlocks {
-					if ipInCIDR(ip, block) {
-						skipped = true
+
+			wg.Add(1)
+			go func(s, e uint32) {
+				defer wg.Done()
+				for ip := s; ; ip++ {
+					skipped := false
+					for _, block := range excludeBlocks {
+						if ipInCIDR(ip, block) {
+							skipped = true
+							break
+						}
+					}
+					if !skipped {
+						ch <- uint32ToIP(ip)
+					}
+					if ip == e {
 						break
 					}
 				}
-				if !skipped {
-					ch <- uint32ToIP(ip)
-				}
-				if ip == end {
-					break
-				}
-			}
+			}(start, end)
 		}
+		wg.Wait()
 	}()
 	return ch, nil
+}
+
+func normalizeCIDRs(cidrs []string) ([]*net.IPNet, error) {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, ipnet, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, err
+		}
+		nets = append(nets, ipnet)
+	}
+
+	// Sort by network address, then by mask length (shorter mask / larger network first)
+	sort.Slice(nets, func(i, j int) bool {
+		ipI := ipToUint32(nets[i].IP.To4())
+		ipJ := ipToUint32(nets[j].IP.To4())
+		if ipI != ipJ {
+			return ipI < ipJ
+		}
+		maskI, _ := nets[i].Mask.Size()
+		maskJ, _ := nets[j].Mask.Size()
+		return maskI < maskJ
+	})
+
+	merged := make([]*net.IPNet, 0, len(nets))
+	for _, n := range nets {
+		keep := true
+		for _, m := range merged {
+			if m.Contains(n.IP) {
+				// n is already covered by m because m is larger or equal and comes first/same start
+				keep = false
+				break
+			}
+		}
+		if keep {
+			merged = append(merged, n)
+		}
+	}
+	return merged, nil
 }
 
 func CIDRSize(cidr string) uint64 {
@@ -160,9 +205,18 @@ func CIDRSize(cidr string) uint64 {
 }
 
 func TotalCIDRSize(cidrs []string) uint64 {
+	normalized, err := normalizeCIDRs(cidrs)
+	if err != nil {
+		return 0
+	}
 	var total uint64
-	for _, cidr := range cidrs {
-		total += CIDRSize(cidr)
+	for _, cidr := range normalized {
+		baseIP := cidr.IP.To4()
+		mask := net.IP(cidr.Mask).To4()
+		start := ipToUint32(baseIP)
+		maskInt := ipToUint32(mask)
+		end := start | ^maskInt
+		total += uint64(end-start) + 1
 	}
 	return total
 }

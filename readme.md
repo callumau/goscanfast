@@ -73,6 +73,7 @@ sudo ./goscanfast 10.0.0.0/8 --exclude excludes.json --ports ports.json --output
 - `--concurrency`: Max concurrent workers (default 1024).
 - `--rate`: Max scans per second (default 1024).
 - `--timeout`: Per-port timeout (default 2s).
+- `--port-concurrency`: Max concurrent ports per host (default auto).
 - `--tui`: Enable/disable TUI (default true).
 - `--targets`: JSON file with CIDR targets.
 

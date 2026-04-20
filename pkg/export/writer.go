@@ -18,6 +18,11 @@ type Writer interface {
 	Close() error
 }
 
+type SMBWriter interface {
+	WriteSMB(models.SMBResult) error
+	Close() error
+}
+
 func NewWriter(format, outputPath string) (Writer, error) {
 	switch strings.ToLower(format) {
 	case "csv":
@@ -27,6 +32,47 @@ func NewWriter(format, outputPath string) (Writer, error) {
 	default:
 		return nil, fmt.Errorf("unsupported format: %s", format)
 	}
+}
+
+func NewSMBCSVWriter(outputPath string) (SMBWriter, error) {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return nil, err
+	}
+
+	csvw := csv.NewWriter(bufio.NewWriter(file))
+	if err := csvw.Write([]string{"ip", "hostname", "share", "path", "type"}); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return &smbCSVWriter{writer: csvw, file: file}, nil
+}
+
+type smbCSVWriter struct {
+	writer *csv.Writer
+	file   *os.File
+}
+
+func (w *smbCSVWriter) WriteSMB(result models.SMBResult) error {
+	if err := w.writer.Write([]string{
+		result.IP,
+		result.Hostname,
+		result.Share,
+		result.Path,
+		result.Type,
+	}); err != nil {
+		return err
+	}
+	w.writer.Flush()
+	return w.writer.Error()
+}
+
+func (w *smbCSVWriter) Close() error {
+	w.writer.Flush()
+	if err := w.writer.Error(); err != nil {
+		return err
+	}
+	return w.file.Close()
 }
 
 type csvWriter struct {

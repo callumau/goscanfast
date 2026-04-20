@@ -4,6 +4,7 @@ build/
 *.exe
 *-amd64
 *-arm64
+goscanfast
 
 # OS generated files
 .DS_Store
@@ -24,3 +25,6 @@ go.work
 go.work.sum
 *.test
 *.out
+
+# Log files
+*.log
