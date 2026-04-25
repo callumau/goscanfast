@@ -14,6 +14,9 @@ import (
 )
 
 func EnumSMB(ctx context.Context, ip, hostname string, writer export.SMBWriter, timeout time.Duration) {
+	if hostname == "" {
+		hostname = lookupHostname(ip)
+	}
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, "445"), timeout)
 	if err != nil {
 		return
@@ -24,6 +27,12 @@ func EnumSMB(ctx context.Context, ip, hostname string, writer export.SMBWriter, 
 		Initiator: &smb2.NTLMInitiator{
 			User: "Guest",
 		},
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+	} else {
+		conn.SetDeadline(time.Now().Add(timeout))
 	}
 
 	s, err := d.DialContext(ctx, conn)

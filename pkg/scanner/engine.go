@@ -116,7 +116,7 @@ func (e *Engine) Run() error {
 	}
 
 	jobs := make(chan net.IP, e.Concurrency)
-	results := make(chan models.Result, e.Concurrency)
+	resultsWriter := make(chan models.Result, e.Concurrency)
 	var limiter <-chan time.Time
 	var ticker *time.Ticker
 	if e.RateLimit > 0 {
@@ -128,6 +128,27 @@ func (e *Engine) Run() error {
 	// Pre-spawn workers
 	var wg sync.WaitGroup
 	var smbWG sync.WaitGroup
+	var dnsWG sync.WaitGroup
+
+	dnsJobs := make(chan models.Result, e.Concurrency)
+
+	// DNS Workers
+	for i := 0; i < e.Concurrency/2+1; i++ {
+		dnsWG.Add(1)
+		go func() {
+			defer dnsWG.Done()
+			for res := range dnsJobs {
+				res.Hostname = lookupHostname(res.IP)
+				if e.Reporter != nil {
+					e.Reporter.OnResult(res)
+				}
+				resultsWriter <- res
+				if e.Reporter != nil {
+					e.Reporter.OnHostDone()
+				}
+			}
+		}()
+	}
 
 	for i := 0; i < e.Concurrency; i++ {
 		wg.Add(1)
@@ -148,38 +169,29 @@ func (e *Engine) Run() error {
 					continue
 				}
 
-				hostname := lookupHostname(ip.String())
+				for _, port := range openPorts {
+					if e.Reporter != nil {
+						e.Reporter.OnPortOpen(ip.String(), port)
+					}
+				}
 
 				// Check for SMB port 445
 				if e.SMBWriter != nil {
 					for _, p := range openPorts {
 						if p == 445 {
 							smbWG.Add(1)
-							go func(targetIP, targetHostname string) {
+							go func(targetIP string) {
 								defer smbWG.Done()
-								EnumSMB(ctx, targetIP, targetHostname, e.SMBWriter, e.Timeout)
-							}(ip.String(), hostname)
+								EnumSMB(ctx, targetIP, "", e.SMBWriter, e.Timeout)
+							}(ip.String())
 							break
 						}
 					}
 				}
 
-				result := models.Result{
-					IP:       ip.String(),
-					Hostname: hostname,
-					Ports:    openPorts,
-				}
-				if e.Reporter != nil {
-					e.Reporter.OnResult(result)
-				}
-				for _, port := range openPorts {
-					if e.Reporter != nil {
-						e.Reporter.OnPortOpen(result.IP, port)
-					}
-				}
-				results <- result
-				if e.Reporter != nil {
-					e.Reporter.OnHostDone()
+				dnsJobs <- models.Result{
+					IP:    ip.String(),
+					Ports: openPorts,
 				}
 			}
 		}(i)
@@ -189,7 +201,7 @@ func (e *Engine) Run() error {
 	writerWG.Add(1)
 	go func() {
 		defer writerWG.Done()
-		for result := range results {
+		for result := range resultsWriter {
 			_ = e.Writer.Write(result)
 		}
 	}()
@@ -203,7 +215,9 @@ func (e *Engine) Run() error {
 	}
 	close(jobs)
 	wg.Wait()
-	close(results)
+	close(dnsJobs)
+	dnsWG.Wait()
+	close(resultsWriter)
 	writerWG.Wait()
 
 	// Wait for SMB tasks to finish
@@ -287,6 +301,9 @@ func resolvedPortConcurrency(requested int, portsCount int) int {
 		cpu = 1
 	}
 	maxByCPU := cpu * 4
+	if maxByCPU > 64 {
+		maxByCPU = 64
+	}
 	maxByPorts := portsCount
 	if maxByCPU < 1 {
 		maxByCPU = 1

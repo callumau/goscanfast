@@ -2,7 +2,6 @@ package export
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -62,7 +61,6 @@ func NewSMBCSVWriter(outputPath string) (SMBWriter, error) {
 		file:       w,
 		closer:     closer,
 		csv:        csvw,
-		results:    make([]models.SMBResult, 0),
 	}, nil
 }
 
@@ -71,14 +69,12 @@ type smbCSVWriter struct {
 	file       io.Writer
 	closer     io.Closer
 	csv        *csv.Writer
-	results    []models.SMBResult
 	mu         sync.Mutex
 }
 
 func (w *smbCSVWriter) WriteSMB(result models.SMBResult) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.results = append(w.results, result)
 
 	if err := w.csv.Write([]string{
 		result.IP,
@@ -89,57 +85,25 @@ func (w *smbCSVWriter) WriteSMB(result models.SMBResult) error {
 	}); err != nil {
 		return err
 	}
-	w.csv.Flush()
-	return w.csv.Error()
+	// Do not flush every row for performance
+	return nil
 }
 
 func (w *smbCSVWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.outputPath == "" {
-		return w.closer.Close()
-	}
-
-	sort.Slice(w.results, func(i, j int) bool {
-		ip1 := net.ParseIP(w.results[i].IP)
-		ip2 := net.ParseIP(w.results[j].IP)
-		return bytes.Compare(ip1, ip2) < 0
-	})
-
-	// Re-open file to overwrite with sorted results
-	file, err := os.Create(w.outputPath)
-	if err != nil {
+	w.csv.Flush()
+	if err := w.csv.Error(); err != nil {
 		w.closer.Close()
 		return err
 	}
-	defer file.Close()
+	_ = w.closer.Close()
 
-	csvw := csv.NewWriter(file)
-	if err := csvw.Write([]string{"ip", "hostname", "share", "path", "type"}); err != nil {
-		w.closer.Close()
-		return err
+	if w.outputPath != "" {
+		return sortCSV(w.outputPath)
 	}
-
-	for _, result := range w.results {
-		if err := csvw.Write([]string{
-			result.IP,
-			result.Hostname,
-			result.Share,
-			result.Path,
-			result.Type,
-		}); err != nil {
-			csvw.Flush()
-			w.closer.Close()
-			return err
-		}
-	}
-	csvw.Flush()
-	if err := csvw.Error(); err != nil {
-		w.closer.Close()
-		return err
-	}
-	return w.closer.Close()
+	return nil
 }
 
 type csvWriter struct {
@@ -147,7 +111,6 @@ type csvWriter struct {
 	file       io.Writer
 	closer     io.Closer
 	csv        *csv.Writer
-	results    []models.Result
 	mu         sync.Mutex
 }
 
@@ -159,7 +122,8 @@ func newCSVWriter(outputPath string) (Writer, error) {
 		if err != nil {
 			return nil, err
 		}
-		w = file
+		// Use buffered writer for file output
+		w = bufio.NewWriterSize(file, 64*1024)
 		closer = file
 	}
 
@@ -175,14 +139,12 @@ func newCSVWriter(outputPath string) (Writer, error) {
 		file:       w,
 		closer:     closer,
 		csv:        csvw,
-		results:    make([]models.Result, 0),
 	}, nil
 }
 
 func (w *csvWriter) Write(result models.Result) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.results = append(w.results, result)
 
 	ports := make([]string, 0, len(result.Ports))
 	for _, p := range result.Ports {
@@ -195,65 +157,198 @@ func (w *csvWriter) Write(result models.Result) error {
 	}); err != nil {
 		return err
 	}
-	w.csv.Flush()
-	return w.csv.Error()
+	// No row-level flush
+	return nil
 }
 
 func (w *csvWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.outputPath == "" {
-		return w.closer.Close()
-	}
-
-	sort.Slice(w.results, func(i, j int) bool {
-		ip1 := net.ParseIP(w.results[i].IP)
-		ip2 := net.ParseIP(w.results[j].IP)
-		return bytes.Compare(ip1, ip2) < 0
-	})
-
-	// Re-open file to overwrite with sorted results
-	file, err := os.Create(w.outputPath)
-	if err != nil {
-		w.closer.Close()
-		return err
-	}
-	defer file.Close()
-
-	csvw := csv.NewWriter(file)
-	if err := csvw.Write([]string{"ip", "hostname", "ports"}); err != nil {
+	w.csv.Flush()
+	if err := w.csv.Error(); err != nil {
 		w.closer.Close()
 		return err
 	}
 
-	for _, result := range w.results {
-		ports := make([]string, 0, len(result.Ports))
-		for _, p := range result.Ports {
-			ports = append(ports, fmt.Sprintf("%d", p))
-		}
-		if err := csvw.Write([]string{
-			result.IP,
-			result.Hostname,
-			strings.Join(ports, ";"),
-		}); err != nil {
-			csvw.Flush()
+	// Flush buffered writer if it exists
+	if bw, ok := w.file.(*bufio.Writer); ok {
+		if err := bw.Flush(); err != nil {
 			w.closer.Close()
 			return err
 		}
 	}
-	csvw.Flush()
-	if err := csvw.Error(); err != nil {
-		w.closer.Close()
+
+	_ = w.closer.Close()
+
+	if w.outputPath != "" {
+		return sortCSV(w.outputPath)
+	}
+	return nil
+}
+
+func sortCSV(path string) error {
+	tmpPath := path + ".tmp"
+	f, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	return w.closer.Close()
+	defer f.Close()
+
+	// External sort: N-way merge sort for multiplatform
+	// For simplicity, we assume we can read rows and sort them by IP uint32
+	// To be truly OOM safe for /8, we need chunked sort + merge.
+	// But first, let's see if we can use a more efficient data structure or 
+	// just ensure we don't OOM by using a small chunk size.
+	
+	// Actually, the best way for /8 is to not sort the whole file in memory.
+	// We'll use a simple external merge sort implementation.
+	return externalSort(path, tmpPath)
+}
+
+type row struct {
+	ip    uint32
+	lines []string
+}
+
+func externalSort(path, tmpPath string) error {
+	const chunkSize = 100000 // Adjust based on memory
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	header, err := reader.Read()
+	if err != nil {
+		return err
+	}
+
+	var chunks []string
+	for {
+		var chunkData [][]string
+		for i := 0; i < chunkSize; i++ {
+			rec, err := reader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			chunkData = append(chunkData, rec)
+		}
+		if len(chunkData) == 0 {
+			break
+		}
+
+		// Sort chunk
+		// We need ipToUint32 but it's in scanner package. 
+		// We'll use a local copy or net.ParseIP.
+		sort.Slice(chunkData, func(i, j int) bool {
+			return ipLess(chunkData[i][0], chunkData[j][0])
+		})
+
+		// Write chunk to tmp file
+		cf, err := os.CreateTemp("", "goscanfast-chunk-*.csv")
+		if err != nil {
+			return err
+		}
+		cw := csv.NewWriter(cf)
+		for _, r := range chunkData {
+			_ = cw.Write(r)
+		}
+		cw.Flush()
+		cf.Close()
+		chunks = append(chunks, cf.Name())
+	}
+
+	// Merge chunks
+	return mergeChunks(chunks, path, header)
+}
+
+func ipLess(ip1, ip2 string) bool {
+	i1 := parseIP(ip1)
+	i2 := parseIP(ip2)
+	return i1 < i2
+}
+
+func parseIP(s string) uint32 {
+	ip := net.ParseIP(s).To4()
+	if ip == nil {
+		return 0
+	}
+	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+}
+
+func mergeChunks(chunks []string, outputPath string, header []string) error {
+	defer func() {
+		for _, c := range chunks {
+			os.Remove(c)
+		}
+	}()
+
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	_ = w.Write(header)
+
+	files := make([]*os.File, len(chunks))
+	readers := make([]*csv.Reader, len(chunks))
+	current := make([][]string, len(chunks))
+
+	for i, c := range chunks {
+		files[i], _ = os.Open(c)
+		readers[i] = csv.NewReader(files[i])
+		rec, err := readers[i].Read()
+		if err == nil {
+			current[i] = rec
+		}
+	}
+
+	for {
+		minIdx := -1
+		var minIP uint32
+		for i, rec := range current {
+			if rec == nil {
+				continue
+			}
+			ip := parseIP(rec[0])
+			if minIdx == -1 || ip < minIP {
+				minIdx = i
+				minIP = ip
+			}
+		}
+
+		if minIdx == -1 {
+			break
+		}
+
+		_ = w.Write(current[minIdx])
+		rec, err := readers[minIdx].Read()
+		if err != nil {
+			current[minIdx] = nil
+		} else {
+			current[minIdx] = rec
+		}
+	}
+
+	w.Flush()
+	for _, f := range files {
+		f.Close()
+	}
+	return nil
 }
 
 type jsonWriter struct {
-	writer *bufio.Writer
-	closer io.Closer
-	first  bool
+	writer   *bufio.Writer
+	closer   io.Closer
+	first    bool
+	rowCount int
 }
 
 func newJSONWriter(outputPath string) (Writer, error) {
@@ -293,7 +388,11 @@ func (w *jsonWriter) Write(result models.Result) error {
 		return err
 	}
 	w.first = false
-	return w.writer.Flush()
+	w.rowCount++
+	if w.rowCount%1000 == 0 {
+		return w.writer.Flush()
+	}
+	return nil
 }
 
 func (w *jsonWriter) Close() error {

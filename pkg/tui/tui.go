@@ -251,13 +251,6 @@ func formatETA(total, completed uint64, rate float64) string {
 	return fmt.Sprintf("%ds", secs)
 }
 
-func pendingCount(total, enqueued uint64) uint64 {
-	if total == 0 || enqueued >= total {
-		return 0
-	}
-	return total - enqueued
-}
-
 func queuedCount(enqueued, inFlight, completed uint64) uint64 {
 	if enqueued <= inFlight+completed {
 		return 0
@@ -266,18 +259,12 @@ func queuedCount(enqueued, inFlight, completed uint64) uint64 {
 }
 
 func (r *Runner) addLiveLine(ip, status string) {
-	if ip == "" && status == "" {
+	if ip == "" {
 		return
 	}
 	line := ip
 	if status != "" {
 		line = fmt.Sprintf("%s -> %s", ip, status)
-	}
-	if ip == "" {
-		line = status
-	}
-	if ip == "Scanning..." {
-		line = "Scanning..."
 	}
 	r.liveMu.Lock()
 	r.liveLines = append([]string{line}, r.liveLines...)
@@ -321,6 +308,22 @@ func statBar(value uint64, width int) string {
 	filled := width
 	if value == 0 {
 		filled = 0
+	} else {
+		// log10 scale: 0-9 → 20%, 10-99 → 40%, 100-999 → 60%, 1000-9999 → 80%, 10000+ → 100%
+		p := int(value)
+		level := 0
+		for p >= 10 {
+			p /= 10
+			level++
+		}
+		frac := []int{20, 40, 60, 80, 100}
+		if level >= len(frac) {
+			level = len(frac) - 1
+		}
+		filled = width * frac[level] / 100
+		if filled < 1 {
+			filled = 1
+		}
 	}
 	return fmt.Sprintf("[%s%s]", strings.Repeat("#", filled), strings.Repeat(" ", width-filled))
 }

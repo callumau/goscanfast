@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"sync"
 )
 
 type cidrBlock struct {
@@ -24,13 +23,18 @@ func parseCIDRList(cidrs []string) ([]cidrBlock, error) {
 			return nil, fmt.Errorf("CIDR %q is not IPv4", raw)
 		}
 		mask := net.IP(ipnet.Mask).To4()
-		blocks = append(blocks, cidrBlock{base: ipToUint32(ip), mask: ipToUint32(mask)})
+		blocks = append(blocks, cidrBlock{base: IpToUint32(ip), mask: IpToUint32(mask)})
 	}
 	return blocks, nil
 }
 
-func ipToUint32(ip net.IP) uint32 {
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+// IpToUint32 converts net.IP to uint32.
+func IpToUint32(ip net.IP) uint32 {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0
+	}
+	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
 }
 
 func uint32ToIP(v uint32) net.IP {
@@ -60,8 +64,8 @@ func GenerateIPs(cidr string, excludes []string) (<-chan net.IP, error) {
 		return nil, err
 	}
 
-	start := ipToUint32(baseIP)
-	maskInt := ipToUint32(mask)
+	start := IpToUint32(baseIP)
+	maskInt := IpToUint32(mask)
 	end := start | ^maskInt
 
 	ch := make(chan net.IP, 1024)
@@ -110,35 +114,29 @@ func GenerateIPsMulti(cidrs []string, excludes []string) (<-chan net.IP, error) 
 	ch := make(chan net.IP, 1024)
 	go func() {
 		defer close(ch)
-		var wg sync.WaitGroup
 		for _, cidr := range normalized {
 			baseIP := cidr.IP.To4()
 			mask := net.IP(cidr.Mask).To4()
-			start := ipToUint32(baseIP)
-			maskInt := ipToUint32(mask)
+			start := IpToUint32(baseIP)
+			maskInt := IpToUint32(mask)
 			end := start | ^maskInt
 
-			wg.Add(1)
-			go func(s, e uint32) {
-				defer wg.Done()
-				for ip := s; ; ip++ {
-					skipped := false
-					for _, block := range excludeBlocks {
-						if ipInCIDR(ip, block) {
-							skipped = true
-							break
-						}
-					}
-					if !skipped {
-						ch <- uint32ToIP(ip)
-					}
-					if ip == e {
+			for ip := start; ; ip++ {
+				skipped := false
+				for _, block := range excludeBlocks {
+					if ipInCIDR(ip, block) {
+						skipped = true
 						break
 					}
 				}
-			}(start, end)
+				if !skipped {
+					ch <- uint32ToIP(ip)
+				}
+				if ip == end {
+					break
+				}
+			}
 		}
-		wg.Wait()
 	}()
 	return ch, nil
 }
@@ -155,8 +153,8 @@ func normalizeCIDRs(cidrs []string) ([]*net.IPNet, error) {
 
 	// Sort by network address, then by mask length (shorter mask / larger network first)
 	sort.Slice(nets, func(i, j int) bool {
-		ipI := ipToUint32(nets[i].IP.To4())
-		ipJ := ipToUint32(nets[j].IP.To4())
+		ipI := IpToUint32(nets[i].IP.To4())
+		ipJ := IpToUint32(nets[j].IP.To4())
 		if ipI != ipJ {
 			return ipI < ipJ
 		}
@@ -195,8 +193,8 @@ func CIDRSize(cidr string) uint64 {
 	if mask == nil {
 		return 0
 	}
-	start := ipToUint32(baseIP)
-	maskInt := ipToUint32(mask)
+	start := IpToUint32(baseIP)
+	maskInt := IpToUint32(mask)
 	end := start | ^maskInt
 	if end < start {
 		return 0
@@ -213,8 +211,8 @@ func TotalCIDRSize(cidrs []string) uint64 {
 	for _, cidr := range normalized {
 		baseIP := cidr.IP.To4()
 		mask := net.IP(cidr.Mask).To4()
-		start := ipToUint32(baseIP)
-		maskInt := ipToUint32(mask)
+		start := IpToUint32(baseIP)
+		maskInt := IpToUint32(mask)
 		end := start | ^maskInt
 		total += uint64(end-start) + 1
 	}
@@ -234,8 +232,8 @@ func CIDRRange(cidr string) (string, string, error) {
 	if mask == nil {
 		return "", "", fmt.Errorf("CIDR %q is not IPv4", cidr)
 	}
-	start := ipToUint32(baseIP)
-	maskInt := ipToUint32(mask)
+	start := IpToUint32(baseIP)
+	maskInt := IpToUint32(mask)
 	end := start | ^maskInt
 	return uint32ToIP(start).String(), uint32ToIP(end).String(), nil
 }
