@@ -64,6 +64,18 @@ sudo ./goscanfast 10.0.0.0/8 --ports 22,80,443 --output results.csv
 sudo ./goscanfast 10.0.0.0/8 --exclude excludes.json --ports ports.json --output results.csv
 ```
 
+## Reliability Tips
+
+Default settings prioritize speed. On large ranges, some hosts can be missed if timeouts are too tight or rate is too high for your network path.
+
+If results look unexpectedly low:
+
+```bash
+sudo ./goscanfast 10.0.0.0/8 --ports 22,80,443 --timeout 2s --retries 2 --rate 256 --output results.csv
+```
+
+Also try a small slice (e.g., a /24) first to confirm consistency before scaling up.
+
 ## Flags
 
 - `--exclude`: Path to JSON file with CIDR strings to skip.
@@ -73,6 +85,7 @@ sudo ./goscanfast 10.0.0.0/8 --exclude excludes.json --ports ports.json --output
 - `--concurrency`: Max concurrent workers (default 1024).
 - `--rate`: Max scans per second (default 1024).
 - `--timeout`: Per-port timeout (default 0.5s).
+- `--retries`: Retries per port (default 1).
 - `--port-concurrency`: Max concurrent ports per host (default auto).
 - `--tui`: Enable/disable TUI (default true).
 - `--targets`: JSON file with CIDR targets.
