@@ -29,6 +29,8 @@ type Engine struct {
 	SMBWriter   export.SMBWriter
 	Reporter    Reporter
 	RateLimit   int
+	PortRateLimit int
+	PortInflightLimit int
 }
 
 type Reporter interface {
@@ -133,6 +135,17 @@ func (e *Engine) Run() error {
 		limiter = ticker.C
 		defer ticker.Stop()
 	}
+	var portLimiter <-chan time.Time
+	var portTicker *time.Ticker
+	if e.PortRateLimit > 0 {
+		portTicker = time.NewTicker(time.Second / time.Duration(e.PortRateLimit))
+		portLimiter = portTicker.C
+		defer portTicker.Stop()
+	}
+	var portInflight chan struct{}
+	if e.PortInflightLimit > 0 {
+		portInflight = make(chan struct{}, e.PortInflightLimit)
+	}
 
 	var writerWG sync.WaitGroup
 	writerWG.Add(1)
@@ -195,7 +208,7 @@ func (e *Engine) Run() error {
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
-				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)))
+				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)), portLimiter, portInflight)
 				if len(openPorts) == 0 {
 					if e.Reporter != nil {
 						e.Reporter.OnHostDone()
@@ -240,15 +253,24 @@ func (e *Engine) Run() error {
 	return nil
 }
 
-func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, retries int, portConcurrency int) []int {
+func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, retries int, portConcurrency int, limiter <-chan time.Time, inflight chan struct{}) []int {
 	if len(ports) == 0 {
 		return nil
 	}
 	if portConcurrency <= 0 || portConcurrency == 1 {
 		open := make([]int, 0)
 		for _, port := range ports {
+			if limiter != nil {
+				<-limiter
+			}
+			if inflight != nil {
+				inflight <- struct{}{}
+			}
 			if ScanPort(ctx, ip, port, timeout, retries) {
 				open = append(open, port)
+			}
+			if inflight != nil {
+				<-inflight
 			}
 		}
 		sort.Ints(open)
@@ -270,6 +292,13 @@ func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duratio
 		go func(p int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if limiter != nil {
+				<-limiter
+			}
+			if inflight != nil {
+				inflight <- struct{}{}
+				defer func() { <-inflight }()
+			}
 
 			if ScanPort(ctx, ip, p, timeout, retries) {
 				mu.Lock()
