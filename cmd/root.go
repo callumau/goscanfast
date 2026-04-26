@@ -25,6 +25,9 @@ var (
 	flagTargets     string
 	flagPortConcurrency int
 	flagRetries     int
+	flagResolveDNS  bool
+	flagAdminConcurrency int
+	flagSMBConcurrency int
 )
 
 var rootCmd = &cobra.Command{
@@ -107,6 +110,9 @@ var rootCmd = &cobra.Command{
 			PortConcurrency: flagPortConcurrency,
 			Timeout:         flagTimeout,
 			Retries:         flagRetries,
+			ResolveDNS:      flagResolveDNS,
+			AdminConcurrency: flagAdminConcurrency,
+			SMBConcurrency:   flagSMBConcurrency,
 			Writer:          writer,
 			SMBWriter:       smbWriter,
 			Reporter:        reporters,
@@ -136,6 +142,9 @@ func init() {
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
 	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
 	rootCmd.Flags().IntVar(&flagRetries, "retries", 1, "Retries per port (0=disable)")
+	rootCmd.Flags().BoolVar(&flagResolveDNS, "resolve-dns", true, "Resolve hostnames (PTR) for open hosts")
+	rootCmd.Flags().IntVar(&flagAdminConcurrency, "admin-concurrency", 128, "Max concurrent admin workers (0=auto, default 128)")
+	rootCmd.Flags().IntVar(&flagSMBConcurrency, "smb-concurrency", 8, "Max concurrent SMB workers (0=auto, default 8)")
 
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)

@@ -22,6 +22,9 @@ type Engine struct {
 	PortConcurrency int
 	Timeout     time.Duration
 	Retries     int
+	ResolveDNS  bool
+	AdminConcurrency int
+	SMBConcurrency   int
 	Writer      export.Writer
 	SMBWriter   export.SMBWriter
 	Reporter    Reporter
@@ -118,6 +121,11 @@ func (e *Engine) Run() error {
 
 	jobs := make(chan net.IP, e.Concurrency)
 	resultsWriter := make(chan models.Result, e.Concurrency)
+	adminQueueSize := e.Concurrency * 4
+	if adminQueueSize < e.Concurrency {
+		adminQueueSize = e.Concurrency
+	}
+	adminJobs := make(chan models.Result, adminQueueSize)
 	var limiter <-chan time.Time
 	var ticker *time.Ticker
 	if e.RateLimit > 0 {
@@ -126,20 +134,44 @@ func (e *Engine) Run() error {
 		defer ticker.Stop()
 	}
 
-	// Pre-spawn workers
-	var wg sync.WaitGroup
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		for result := range resultsWriter {
+			_ = e.Writer.Write(result)
+		}
+	}()
+
 	var smbWG sync.WaitGroup
-	var dnsWG sync.WaitGroup
+	var smbJobs chan string
+	if e.SMBWriter != nil {
+		smbJobs = make(chan string, adminQueueSize)
+		smbConcurrency := resolvedSMBConcurrency(e.SMBConcurrency, resolvedAdminConcurrency(e.AdminConcurrency, e.Concurrency))
+		for i := 0; i < smbConcurrency; i++ {
+			smbWG.Add(1)
+			go func() {
+				defer smbWG.Done()
+				for targetIP := range smbJobs {
+					EnumSMB(ctx, targetIP, "", e.SMBWriter, e.Timeout)
+				}
+			}()
+		}
+	}
 
-	dnsJobs := make(chan models.Result, e.Concurrency)
-
-	// DNS Workers
-	for i := 0; i < e.Concurrency/2+1; i++ {
-		dnsWG.Add(1)
+	var adminWG sync.WaitGroup
+	adminConcurrency := resolvedAdminConcurrency(e.AdminConcurrency, e.Concurrency)
+	for i := 0; i < adminConcurrency; i++ {
+		adminWG.Add(1)
 		go func() {
-			defer dnsWG.Done()
-			for res := range dnsJobs {
-				res.Hostname = lookupHostname(res.IP)
+			defer adminWG.Done()
+			for res := range adminJobs {
+				if e.ResolveDNS {
+					res.Hostname = lookupHostname(res.IP)
+				}
+				if smbJobs != nil && hasPort(res.Ports, 445) {
+					smbJobs <- res.IP
+				}
 				if e.Reporter != nil {
 					e.Reporter.OnResult(res)
 				}
@@ -151,6 +183,7 @@ func (e *Engine) Run() error {
 		}()
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < e.Concurrency; i++ {
 		wg.Add(1)
 		go func(workerID int) {
@@ -176,21 +209,7 @@ func (e *Engine) Run() error {
 					}
 				}
 
-				// Check for SMB port 445
-				if e.SMBWriter != nil {
-					for _, p := range openPorts {
-						if p == 445 {
-							smbWG.Add(1)
-							go func(targetIP string) {
-								defer smbWG.Done()
-								EnumSMB(ctx, targetIP, "", e.SMBWriter, e.Timeout)
-							}(ip.String())
-							break
-						}
-					}
-				}
-
-				dnsJobs <- models.Result{
+				adminJobs <- models.Result{
 					IP:    ip.String(),
 					Ports: openPorts,
 				}
@@ -198,16 +217,6 @@ func (e *Engine) Run() error {
 		}(i)
 	}
 
-	var writerWG sync.WaitGroup
-	writerWG.Add(1)
-	go func() {
-		defer writerWG.Done()
-		for result := range resultsWriter {
-			_ = e.Writer.Write(result)
-		}
-	}()
-
-	// Feeder
 	for ip := range ips {
 		jobs <- ip
 		if e.Reporter != nil {
@@ -216,13 +225,14 @@ func (e *Engine) Run() error {
 	}
 	close(jobs)
 	wg.Wait()
-	close(dnsJobs)
-	dnsWG.Wait()
+	close(adminJobs)
+	adminWG.Wait()
+	if smbJobs != nil {
+		close(smbJobs)
+		smbWG.Wait()
+	}
 	close(resultsWriter)
 	writerWG.Wait()
-
-	// Wait for SMB tasks to finish
-	smbWG.Wait()
 
 	if e.Reporter != nil {
 		e.Reporter.OnDone()
@@ -312,4 +322,36 @@ func resolvedPortConcurrency(requested int, portsCount int) int {
 		return maxByPorts
 	}
 	return maxByCPU
+}
+
+func resolvedAdminConcurrency(requested int, scanConcurrency int) int {
+	if requested > 0 {
+		return requested
+	}
+	if scanConcurrency < 2 {
+		return 1
+	}
+	return scanConcurrency/2 + 1
+}
+
+func resolvedSMBConcurrency(requested int, adminConcurrency int) int {
+	if requested > 0 {
+		return requested
+	}
+	if adminConcurrency < 1 {
+		return 1
+	}
+	if adminConcurrency > 8 {
+		return 8
+	}
+	return adminConcurrency
+}
+
+func hasPort(ports []int, target int) bool {
+	for _, p := range ports {
+		if p == target {
+			return true
+		}
+	}
+	return false
 }
