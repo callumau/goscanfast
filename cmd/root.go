@@ -24,6 +24,7 @@ var (
 	flagRate        int
 	flagTargets     string
 	flagPortConcurrency int
+	flagDialConcurrency int
 )
 
 var rootCmd = &cobra.Command{
@@ -104,6 +105,7 @@ var rootCmd = &cobra.Command{
 			Ports:           ports,
 			Concurrency:     flagConcurrency,
 			PortConcurrency: flagPortConcurrency,
+			DialConcurrency: flagDialConcurrency,
 			Timeout:         flagTimeout,
 			Writer:          writer,
 			SMBWriter:       smbWriter,
@@ -133,6 +135,7 @@ func init() {
 	rootCmd.Flags().IntVar(&flagRate, "rate", 1024, "Max scans per second (hosts/sec)")
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
 	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
+	rootCmd.Flags().IntVar(&flagDialConcurrency, "dial-concurrency", 0, "Max concurrent TCP dials globally (0=auto)")
 
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)
