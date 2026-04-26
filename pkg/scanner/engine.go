@@ -301,8 +301,8 @@ func resolvedPortConcurrency(requested int, portsCount int) int {
 		cpu = 1
 	}
 	maxByCPU := cpu * 4
-	if maxByCPU > 128 {
-		maxByCPU = 128
+	if maxByCPU > 64 {
+		maxByCPU = 64
 	}
 	maxByPorts := portsCount
 	if maxByCPU < 1 {
