@@ -21,6 +21,7 @@ type Engine struct {
 	Concurrency int
 	PortConcurrency int
 	Timeout     time.Duration
+	Retries     int
 	Writer      export.Writer
 	SMBWriter   export.SMBWriter
 	Reporter    Reporter
@@ -161,7 +162,7 @@ func (e *Engine) Run() error {
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
-				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)))
+				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)))
 				if len(openPorts) == 0 {
 					if e.Reporter != nil {
 						e.Reporter.OnHostDone()
@@ -229,18 +230,16 @@ func (e *Engine) Run() error {
 	return nil
 }
 
-func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, portConcurrency int) []int {
+func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, retries int, portConcurrency int) []int {
 	if len(ports) == 0 {
 		return nil
 	}
 	if portConcurrency <= 0 || portConcurrency == 1 {
 		open := make([]int, 0)
 		for _, port := range ports {
-			portCtx, cancel := context.WithTimeout(ctx, timeout)
-			if ScanPort(portCtx, ip, port, timeout) {
+			if ScanPort(ctx, ip, port, timeout, retries) {
 				open = append(open, port)
 			}
-			cancel()
 		}
 		sort.Ints(open)
 		return open
@@ -262,13 +261,11 @@ func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duratio
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			portCtx, cancel := context.WithTimeout(ctx, timeout)
-			if ScanPort(portCtx, ip, p, timeout) {
+			if ScanPort(ctx, ip, p, timeout, retries) {
 				mu.Lock()
 				open = append(open, p)
 				mu.Unlock()
 			}
-			cancel()
 		}(port)
 	}
 
