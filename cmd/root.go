@@ -25,11 +25,6 @@ var (
 	flagTargets     string
 	flagPortConcurrency int
 	flagRetries     int
-	flagResolveDNS  bool
-	flagAdminConcurrency int
-	flagSMBConcurrency int
-	flagPortRate int
-	flagPortInflight int
 )
 
 var rootCmd = &cobra.Command{
@@ -112,15 +107,10 @@ var rootCmd = &cobra.Command{
 			PortConcurrency: flagPortConcurrency,
 			Timeout:         flagTimeout,
 			Retries:         flagRetries,
-			ResolveDNS:      flagResolveDNS,
-			AdminConcurrency: flagAdminConcurrency,
-			SMBConcurrency:   flagSMBConcurrency,
 			Writer:          writer,
 			SMBWriter:       smbWriter,
 			Reporter:        reporters,
 			RateLimit:       flagRate,
-			PortRateLimit:   flagPortRate,
-			PortInflightLimit: flagPortInflight,
 		}
 
 		return engine.Run()
@@ -139,18 +129,13 @@ func init() {
 	rootCmd.Flags().StringVar(&flagPorts, "ports", "", "Path to JSON file with ports array")
 	rootCmd.Flags().StringVar(&flagFormat, "format", "csv", "Output format: csv or json")
 	rootCmd.Flags().StringVar(&flagOutput, "output", "", "Output file (default stdout)")
-	rootCmd.Flags().IntVar(&flagConcurrency, "concurrency", 1024, "Max concurrent workers")
+	rootCmd.Flags().IntVar(&flagConcurrency, "concurrency", 128, "Max concurrent workers")
 	rootCmd.Flags().DurationVar(&flagTimeout, "timeout", 2*time.Second, "Per-port timeout")
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", true, "Show TUI progress (requires --output)")
 	rootCmd.Flags().IntVar(&flagRate, "rate", 1024, "Max scans per second (hosts/sec)")
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
 	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
 	rootCmd.Flags().IntVar(&flagRetries, "retries", 1, "Retries per port (0=disable)")
-	rootCmd.Flags().BoolVar(&flagResolveDNS, "resolve-dns", true, "Resolve hostnames (PTR) for open hosts")
-	rootCmd.Flags().IntVar(&flagAdminConcurrency, "admin-concurrency", 128, "Max concurrent admin workers (0=auto, default 128)")
-	rootCmd.Flags().IntVar(&flagSMBConcurrency, "smb-concurrency", 8, "Max concurrent SMB workers (0=auto, default 8)")
-	rootCmd.Flags().IntVar(&flagPortRate, "port-rate", 4096, "Max port connects per second (0=disable, default 4096)")
-	rootCmd.Flags().IntVar(&flagPortInflight, "port-inflight", 1024, "Max in-flight port connections (0=disable, default 1024)")
 
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)
