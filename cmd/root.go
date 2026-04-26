@@ -128,7 +128,7 @@ func init() {
 	rootCmd.Flags().StringVar(&flagFormat, "format", "csv", "Output format: csv or json")
 	rootCmd.Flags().StringVar(&flagOutput, "output", "", "Output file (default stdout)")
 	rootCmd.Flags().IntVar(&flagConcurrency, "concurrency", 1024, "Max concurrent workers")
-	rootCmd.Flags().DurationVar(&flagTimeout, "timeout", 2*time.Second, "Per-port timeout")
+	rootCmd.Flags().DurationVar(&flagTimeout, "timeout", 5*time.Second, "Per-port timeout")
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", true, "Show TUI progress (requires --output)")
 	rootCmd.Flags().IntVar(&flagRate, "rate", 1024, "Max scans per second (hosts/sec)")
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")

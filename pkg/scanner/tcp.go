@@ -7,14 +7,14 @@ import (
 	"time"
 )
 
-func ScanPort(ctx context.Context, ip string, port int, timeout time.Duration) bool {
+func ScanPort(ctx context.Context, ip string, port int, timeout time.Duration) (open bool, timedOut bool) {
 	addr := net.JoinHostPort(ip, formatPort(port))
 	dialer := &net.Dialer{Timeout: timeout}
 
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err == nil {
 		_ = conn.Close()
-		return true
+		return true, false
 	}
 
 	// Retry once on timeout — may be transient packet loss to live host.
@@ -23,11 +23,14 @@ func ScanPort(ctx context.Context, ip string, port int, timeout time.Duration) b
 		conn, err = dialer.DialContext(ctx, "tcp", addr)
 		if err == nil {
 			_ = conn.Close()
-			return true
+			return true, false
+		}
+		if netErr2, ok2 := err.(net.Error); ok2 && netErr2.Timeout() {
+			return false, true
 		}
 	}
 
-	return false
+	return false, false
 }
 
 func formatPort(port int) string {

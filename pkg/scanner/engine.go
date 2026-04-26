@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"goscanfast/pkg/export"
@@ -25,6 +26,7 @@ type Engine struct {
 	SMBWriter   export.SMBWriter
 	Reporter    Reporter
 	RateLimit   int
+	adaptivePC  atomic.Int32
 }
 
 type Reporter interface {
@@ -111,6 +113,13 @@ func (e *Engine) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	maxPC := resolvedPortConcurrency(e.PortConcurrency, len(e.Ports))
+	e.adaptivePC.Store(int32(maxPC))
+
+	var totalDials atomic.Uint64
+	var timeoutDials atomic.Uint64
+	go e.adapt(ctx, maxPC, &totalDials, &timeoutDials)
+
 	if e.Reporter != nil {
 		e.Reporter.OnStart(TotalCIDRSize(e.CIDRs))
 	}
@@ -161,7 +170,7 @@ func (e *Engine) Run() error {
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
-				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)))
+				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, int(e.adaptivePC.Load()), &totalDials, &timeoutDials)
 				if len(openPorts) == 0 {
 					if e.Reporter != nil {
 						e.Reporter.OnHostDone()
@@ -229,18 +238,23 @@ func (e *Engine) Run() error {
 	return nil
 }
 
-func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, portConcurrency int) []int {
+func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, portConcurrency int, totalDials, timeoutDials *atomic.Uint64) []int {
 	if len(ports) == 0 {
 		return nil
 	}
 	if portConcurrency <= 0 || portConcurrency == 1 {
 		open := make([]int, 0)
 		for _, port := range ports {
-			portCtx, cancel := context.WithTimeout(ctx, timeout)
-			if ScanPort(portCtx, ip, port, timeout) {
+			ok, to := ScanPort(ctx, ip, port, timeout)
+			if totalDials != nil {
+				totalDials.Add(1)
+			}
+			if to && timeoutDials != nil {
+				timeoutDials.Add(1)
+			}
+			if ok {
 				open = append(open, port)
 			}
-			cancel()
 		}
 		sort.Ints(open)
 		return open
@@ -262,19 +276,56 @@ func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duratio
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			portCtx, cancel := context.WithTimeout(ctx, timeout)
-			if ScanPort(portCtx, ip, p, timeout) {
+			ok, to := ScanPort(ctx, ip, p, timeout)
+			if totalDials != nil {
+				totalDials.Add(1)
+			}
+			if to && timeoutDials != nil {
+				timeoutDials.Add(1)
+			}
+			if ok {
 				mu.Lock()
 				open = append(open, p)
 				mu.Unlock()
 			}
-			cancel()
 		}(port)
 	}
 
 	wg.Wait()
 	sort.Ints(open)
 	return open
+}
+
+func (e *Engine) adapt(ctx context.Context, maxPC int, totalDials, timeoutDials *atomic.Uint64) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			total := totalDials.Swap(0)
+			timeouts := timeoutDials.Swap(0)
+			if total < 10 {
+				continue
+			}
+			rate := float64(timeouts) / float64(total)
+			current := int(e.adaptivePC.Load())
+			if rate > 0.30 {
+				newPC := current / 2
+				if newPC < 1 {
+					newPC = 1
+				}
+				e.adaptivePC.Store(int32(newPC))
+			} else if rate < 0.05 && current < maxPC {
+				newPC := current + 1
+				if newPC > maxPC {
+					newPC = maxPC
+				}
+				e.adaptivePC.Store(int32(newPC))
+			}
+		}
+	}
 }
 
 func lookupHostname(ip string) string {
