@@ -15,11 +15,13 @@ builds:
       - arm64
     main: ./main.go
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     # use zip for windows archives
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 checksum:
   name_template: 'checksums.txt'
 snapshot:
