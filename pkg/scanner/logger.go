@@ -44,9 +44,10 @@ func (l *ActivityLogger) log(msg string) {
 }
 
 func (l *ActivityLogger) OnStart(total uint64) {
+	l.mu.Lock()
 	l.startTime = time.Now()
-	// lastLogTime remains zero to allow first log
-	l.total = total
+	l.mu.Unlock()
+	atomic.StoreUint64(&l.total, total)
 	l.log(fmt.Sprintf("Scan started for range(s): %v. Total targets: %d", l.cidrs, total))
 }
 
@@ -72,12 +73,15 @@ func (l *ActivityLogger) OnHostDone() {
 }
 
 func (l *ActivityLogger) reportProgress(completed uint64) {
+	l.mu.Lock()
 	elapsed := time.Since(l.startTime)
+	l.mu.Unlock()
+	total := atomic.LoadUint64(&l.total)
 	rate := float64(completed) / elapsed.Seconds()
 	
 	var eta string
-	if l.total > completed && rate > 0 {
-		remaining := float64(l.total - completed)
+	if total > completed && rate > 0 {
+		remaining := float64(total - completed)
 		seconds := remaining / rate
 		eta = time.Duration(seconds * float64(time.Second)).Round(time.Second).String()
 	} else {
@@ -85,12 +89,12 @@ func (l *ActivityLogger) reportProgress(completed uint64) {
 	}
 
 	percent := 0.0
-	if l.total > 0 {
-		percent = (float64(completed) / float64(l.total)) * 100
+	if total > 0 {
+		percent = (float64(completed) / float64(total)) * 100
 	}
 
 	l.log(fmt.Sprintf("Progress: %d/%d (%.2f%%) | Rate: %.1f hosts/s | ETA: %s", 
-		completed, l.total, percent, rate, eta))
+		completed, total, percent, rate, eta))
 }
 
 func (l *ActivityLogger) OnPortOpen(ip string, port int) {

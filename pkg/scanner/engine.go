@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"runtime"
 	"sort"
@@ -104,6 +105,11 @@ func (e *Engine) Run() error {
 		return errors.New("writer is required")
 	}
 
+	totalSize := TotalCIDRSize(e.CIDRs)
+	if totalSize > 1<<24 {
+		return fmt.Errorf("target range too large (%d hosts, max %d); split into smaller ranges", totalSize, 1<<24)
+	}
+
 	ips, err := GenerateIPsMulti(e.CIDRs, e.Exclude)
 	if err != nil {
 		return err
@@ -156,9 +162,6 @@ func (e *Engine) Run() error {
 		go func(workerID int) {
 			defer wg.Done()
 			for ip := range jobs {
-				if limiter != nil {
-					<-limiter
-				}
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
@@ -209,6 +212,9 @@ func (e *Engine) Run() error {
 
 	// Feeder
 	for ip := range ips {
+		if limiter != nil {
+			<-limiter
+		}
 		jobs <- ip
 		if e.Reporter != nil {
 			e.Reporter.OnHostEnqueued()

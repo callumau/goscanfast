@@ -48,6 +48,7 @@ type Runner struct {
 	footer    *tview.TextView
 
 	stopOnce sync.Once
+	done     chan struct{}
 }
 
 type Reporter struct {
@@ -106,12 +107,18 @@ func (r *Runner) Reporter() *Reporter {
 
 func (r *Runner) Start() error {
 	r.lastTick = time.Now()
+	r.done = make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
-		for range ticker.C {
-			r.updateRate()
-			r.refresh()
+		for {
+			select {
+			case <-ticker.C:
+				r.updateRate()
+				r.refresh()
+			case <-r.done:
+				return
+			}
 		}
 	}()
 	go func() {
@@ -122,6 +129,7 @@ func (r *Runner) Start() error {
 
 func (r *Runner) Stop() {
 	r.stopOnce.Do(func() {
+		close(r.done)
 		r.app.Stop()
 	})
 }

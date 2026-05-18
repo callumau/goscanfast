@@ -41,7 +41,7 @@ func NewSMBCSVWriter(outputPath string) (SMBWriter, error) {
 	var w io.Writer = os.Stdout
 	var closer io.Closer = io.NopCloser(nil)
 	if outputPath != "" {
-		file, err := os.Create(outputPath)
+		file, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return nil, err
 		}
@@ -85,8 +85,8 @@ func (w *smbCSVWriter) WriteSMB(result models.SMBResult) error {
 	}); err != nil {
 		return err
 	}
-	// Do not flush every row for performance
-	return nil
+	w.csv.Flush()
+	return w.csv.Error()
 }
 
 func (w *smbCSVWriter) Close() error {
@@ -188,22 +188,7 @@ func (w *csvWriter) Close() error {
 }
 
 func sortCSV(path string) error {
-	tmpPath := path + ".tmp"
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	// External sort: N-way merge sort for multiplatform
-	// For simplicity, we assume we can read rows and sort them by IP uint32
-	// To be truly OOM safe for /8, we need chunked sort + merge.
-	// But first, let's see if we can use a more efficient data structure or 
-	// just ensure we don't OOM by using a small chunk size.
-	
-	// Actually, the best way for /8 is to not sort the whole file in memory.
-	// We'll use a simple external merge sort implementation.
-	return externalSort(path, tmpPath)
+	return externalSort(path)
 }
 
 type row struct {
@@ -211,7 +196,7 @@ type row struct {
 	lines []string
 }
 
-func externalSort(path, tmpPath string) error {
+func externalSort(path string) error {
 	const chunkSize = 100000 // Adjust based on memory
 	f, err := os.Open(path)
 	if err != nil {

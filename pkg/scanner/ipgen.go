@@ -71,7 +71,7 @@ func GenerateIPs(cidr string, excludes []string) (<-chan net.IP, error) {
 	ch := make(chan net.IP, 1024)
 	go func() {
 		defer close(ch)
-		for ip := start; ; ip++ {
+		for ip := start; ; {
 			if len(excludeBlocks) > 0 {
 				skipped := false
 				for _, block := range excludeBlocks {
@@ -84,6 +84,7 @@ func GenerateIPs(cidr string, excludes []string) (<-chan net.IP, error) {
 					if ip == end {
 						break
 					}
+					ip++
 					continue
 				}
 			}
@@ -91,6 +92,7 @@ func GenerateIPs(cidr string, excludes []string) (<-chan net.IP, error) {
 			if ip == end {
 				break
 			}
+			ip++
 		}
 	}()
 	return ch, nil
@@ -121,7 +123,7 @@ func GenerateIPsMulti(cidrs []string, excludes []string) (<-chan net.IP, error) 
 			maskInt := IpToUint32(mask)
 			end := start | ^maskInt
 
-			for ip := start; ; ip++ {
+			for ip := start; ; {
 				skipped := false
 				for _, block := range excludeBlocks {
 					if ipInCIDR(ip, block) {
@@ -135,6 +137,7 @@ func GenerateIPsMulti(cidrs []string, excludes []string) (<-chan net.IP, error) 
 				if ip == end {
 					break
 				}
+				ip++
 			}
 		}
 	}()

@@ -25,6 +25,7 @@ var (
 	flagTargets     string
 	flagPortConcurrency int
 	flagRetries     int
+	flagSMBOutput   string
 )
 
 var rootCmd = &cobra.Command{
@@ -59,9 +60,13 @@ var rootCmd = &cobra.Command{
 		for _, p := range ports {
 			if p == 445 {
 				var err error
-				smbWriter, err = export.NewSMBCSVWriter("smb-results.csv")
-				if err != nil {
-					return fmt.Errorf("failed to create smb-results.csv: %w", err)
+			smbOutput := flagSMBOutput
+			if smbOutput == "" {
+				smbOutput = "smb-results.csv"
+			}
+			smbWriter, err = export.NewSMBCSVWriter(smbOutput)
+			if err != nil {
+				return fmt.Errorf("failed to create %s: %w", smbOutput, err)
 				}
 				defer smbWriter.Close()
 				break
@@ -136,6 +141,7 @@ func init() {
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
 	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
 	rootCmd.Flags().IntVar(&flagRetries, "retries", 1, "Retries per port (0=disable)")
+	rootCmd.Flags().StringVar(&flagSMBOutput, "smb-output", "", "SMB results output file (default smb-results.csv)")
 
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)
