@@ -92,6 +92,12 @@ Also try a small slice (e.g., a /24) first to confirm consistency before scaling
 
 ## JSON Formats
 
+Targets list:
+
+```json
+["10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"]
+```
+
 Exclude list:
 
 ```json
@@ -145,5 +151,5 @@ The realistic benchmark scans a /24 against local TCP listeners and reports an e
 Targets list:
 
 ```json
-["10.0.0.0/8", "10.1.0.0/16"]
+["10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"]
 ```
