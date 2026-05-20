@@ -40,9 +40,9 @@ func BenchmarkRealisticScan24(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for range ips {
-			_ = scanPorts(ctx, "127.0.0.1", ports, timeout, 0, 1)
-		}
+        for range ips {
+            _ = scanPorts(ctx, "127.0.0.1", ports, timeout, 0, 1, nil, nil)
+        }
 	}
 	b.StopTimer()
 	if b.N > 0 {
