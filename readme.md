@@ -71,7 +71,7 @@ Default settings prioritize speed. On large ranges, some hosts can be missed if 
 If results look unexpectedly low:
 
 ```bash
-sudo ./goscanfast 10.0.0.0/8 --ports 22,80,443 --timeout 2s --retries 2 --rate 256 --output results.csv
+sudo ./goscanfast 10.0.0.0/8 --ports 22,80,443 --timeout 2s --retries 2 --pps 256 --output results.csv
 ```
 
 Also try a small slice (e.g., a /24) first to confirm consistency before scaling up.
@@ -82,13 +82,34 @@ Also try a small slice (e.g., a /24) first to confirm consistency before scaling
 - `--ports`: Comma-separated list or JSON file with integer ports.
 - `--format`: `csv` (default) or `json`.
 - `--output`: Output file (required for TUI).
-- `--concurrency`: Max concurrent workers (default 1024).
-- `--rate`: Max scans per second (default 1024).
+- `--concurrency`: Max concurrent workers (default 128).
+- `--pps`: Max packets per second (default 800). Set `0` for unlimited.
 - `--timeout`: Per-port timeout (default 0.5s).
-- `--retries`: Retries per port (default 1).
-- `--port-concurrency`: Max concurrent ports per host (default auto).
+- `--retries`: Retries per port (default 1). Retries count toward PPS.
+- `--port-concurrency`: Max concurrent ports per host (default: all ports). Only reduce for very large port lists (1000+) to limit goroutine count.
 - `--tui`: Enable/disable TUI (default true).
 - `--targets`: JSON file with CIDR targets.
+ - `--targets`: Path to JSON file containing array of CIDR strings (e.g. targets.json). File must be valid JSON array of CIDR strings (no comments).
+
+## Performance Recommendations
+
+The rate limiter (`--pps`) is the primary throughput control. To get actual PPS close to the limit:
+
+- **Don't restrict `--port-concurrency`** unless scanning 1000+ ports. The default (all ports concurrent per host) ensures enough goroutines are waiting for rate-limit tokens. Setting this too low (e.g. 3) starves the rate limiter and actual PPS will sit well below the limit.
+- **`--concurrency`** controls host-level parallelism. Default 128 is good for most scans. Increase if scanning few ports per host with high PPS targets.
+- **Rule of thumb**: `concurrency × port-concurrency × 2` (for retries) should be at least 2-3× your `--pps` value to avoid throughput bottlenecks.
+
+Example for maximum throughput at 800 PPS with default ports:
+
+```bash
+./goscanfast 10.0.0.0/16 --pps 800 --output results.csv
+```
+
+Example for large port lists (controlled goroutine count):
+
+```bash
+./goscanfast 10.0.0.0/16 --ports ports-1000.json --port-concurrency 64 --pps 800 --output results.csv
+```
 
 ## JSON Formats
 
@@ -97,6 +118,24 @@ Targets list:
 ```json
 ["10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"]
 ```
+
+Targets file example (targets.json):
+
+```json
+[
+  "10.0.0.0/8",
+  "192.168.0.0/16",
+  "172.16.0.0/12"
+]
+```
+
+Usage with --targets:
+
+```bash
+sudo ./goscanfast --targets targets.json --output results.csv
+```
+
+Notes: provide relative or absolute path to targets.json. File must be valid JSON (array of strings). Each entry must be CIDR notation. Empty array not allowed.
 
 Exclude list:
 
@@ -125,9 +164,10 @@ The TUI shows:
 
 - Completed hosts
 - Open ports found
-- Average rate (hosts/sec)
-- ETA
-- Recent port findings
+ - Average rate (hosts/sec)
+ - ETA
+ - Recent port findings
+ - Packets/sec (current/limit)
 
 Quit with `q` or `Ctrl+C`.
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"goscanfast/pkg/export"
@@ -21,7 +22,7 @@ var (
 	flagConcurrency int
 	flagTimeout     time.Duration
 	flagTUI         bool
-	flagRate        int
+	flagPPS         int
 	flagTargets     string
 	flagPortConcurrency int
 	flagRetries     int
@@ -82,6 +83,8 @@ var rootCmd = &cobra.Command{
 		var reporters scanner.MultiReporter
 		reporters = append(reporters, activityLogger)
 
+		var packetsSent atomic.Uint64
+
 		var tuiRunner *tui.Runner
 		if flagTUI {
 			if flagOutput == "" {
@@ -95,6 +98,8 @@ var rootCmd = &cobra.Command{
 					RangeEnd:    firstEnd,
 					Total:       total,
 					Concurrency: flagConcurrency,
+					PPS:         flagPPS,
+					PacketsSent: &packetsSent,
 				})
 				reporters = append(reporters, tuiRunner.Reporter())
 				if err := tuiRunner.Start(); err != nil {
@@ -115,7 +120,8 @@ var rootCmd = &cobra.Command{
 			Writer:          writer,
 			SMBWriter:       smbWriter,
 			Reporter:        reporters,
-			RateLimit:       flagRate,
+			PPS:             flagPPS,
+			PacketsSent:     &packetsSent,
 		}
 
 		return engine.Run()
@@ -137,7 +143,7 @@ func init() {
 	rootCmd.Flags().IntVar(&flagConcurrency, "concurrency", 128, "Max concurrent workers")
 	rootCmd.Flags().DurationVar(&flagTimeout, "timeout", 500*time.Millisecond, "Per-port timeout")
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", true, "Show TUI progress (requires --output)")
-	rootCmd.Flags().IntVar(&flagRate, "rate", 1024, "Max scans per second (hosts/sec)")
+	rootCmd.Flags().IntVar(&flagPPS, "pps", 800, "Max packets per second (0=unlimited)")
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
 	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
 	rootCmd.Flags().IntVar(&flagRetries, "retries", 1, "Retries per port (0=disable)")

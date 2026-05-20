@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"goscanfast/pkg/export"
@@ -26,7 +26,8 @@ type Engine struct {
 	Writer      export.Writer
 	SMBWriter   export.SMBWriter
 	Reporter    Reporter
-	RateLimit   int
+	PPS         int
+	PacketsSent *atomic.Uint64
 }
 
 type Reporter interface {
@@ -124,12 +125,38 @@ func (e *Engine) Run() error {
 
 	jobs := make(chan net.IP, e.Concurrency)
 	resultsWriter := make(chan models.Result, e.Concurrency)
-	var limiter <-chan time.Time
-	var ticker *time.Ticker
-	if e.RateLimit > 0 {
-		ticker = time.NewTicker(time.Second / time.Duration(e.RateLimit))
-		limiter = ticker.C
-		defer ticker.Stop()
+	var ppsTicket <-chan struct{}
+	if e.PPS > 0 {
+		// Buffer a full second of tokens so workers never starve after stalls.
+		tickCh := make(chan struct{}, e.PPS)
+		// Use time-based compensation: track how many tokens SHOULD have been
+		// issued since start, issue deficit each tick. Immune to timer jitter.
+		go func() {
+			start := time.Now()
+			var issued int64
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					elapsed := time.Since(start)
+					target := int64(elapsed.Seconds() * float64(e.PPS))
+					deficit := target - issued
+					for i := int64(0); i < deficit; i++ {
+						select {
+						case tickCh <- struct{}{}:
+							issued++
+						default:
+							// buffer full
+							issued++
+						}
+					}
+				}
+			}
+		}()
+		ppsTicket = tickCh
 	}
 
 	// Pre-spawn workers
@@ -165,7 +192,7 @@ func (e *Engine) Run() error {
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
-				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)))
+				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)), ppsTicket, e.PacketsSent)
 				if len(openPorts) == 0 {
 					if e.Reporter != nil {
 						e.Reporter.OnHostDone()
@@ -212,9 +239,6 @@ func (e *Engine) Run() error {
 
 	// Feeder
 	for ip := range ips {
-		if limiter != nil {
-			<-limiter
-		}
 		jobs <- ip
 		if e.Reporter != nil {
 			e.Reporter.OnHostEnqueued()
@@ -236,14 +260,14 @@ func (e *Engine) Run() error {
 	return nil
 }
 
-func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, retries int, portConcurrency int) []int {
+func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duration, retries int, portConcurrency int, ppsTicket <-chan struct{}, packetsSent *atomic.Uint64) []int {
 	if len(ports) == 0 {
 		return nil
 	}
 	if portConcurrency <= 0 || portConcurrency == 1 {
 		open := make([]int, 0)
 		for _, port := range ports {
-			if ScanPort(ctx, ip, port, timeout, retries) {
+			if ScanPort(ctx, ip, port, timeout, retries, ppsTicket, packetsSent) {
 				open = append(open, port)
 			}
 		}
@@ -267,7 +291,7 @@ func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duratio
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if ScanPort(ctx, ip, p, timeout, retries) {
+			if ScanPort(ctx, ip, p, timeout, retries, ppsTicket, packetsSent) {
 				mu.Lock()
 				open = append(open, p)
 				mu.Unlock()
@@ -298,24 +322,7 @@ func resolvedPortConcurrency(requested int, portsCount int) int {
 		}
 		return requested
 	}
-
-	cpu := runtime.GOMAXPROCS(0)
-	if cpu <= 0 {
-		cpu = 1
-	}
-	maxByCPU := cpu * 4
-	if maxByCPU > 64 {
-		maxByCPU = 64
-	}
-	maxByPorts := portsCount
-	if maxByCPU < 1 {
-		maxByCPU = 1
-	}
-	if maxByPorts < 1 {
-		maxByPorts = 1
-	}
-	if maxByCPU > maxByPorts {
-		return maxByPorts
-	}
-	return maxByCPU
+	// Default: scan all ports concurrently per host.
+	// Rate limiter controls overall PPS; no need to serialize port scans.
+	return portsCount
 }

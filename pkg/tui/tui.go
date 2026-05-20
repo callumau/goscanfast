@@ -19,6 +19,8 @@ type Config struct {
 	RangeEnd    string
 	Total       uint64
 	Concurrency int
+	PPS         int
+	PacketsSent *atomic.Uint64
 }
 
 type Runner struct {
@@ -34,6 +36,9 @@ type Runner struct {
 	rateEMA   float64
 	lastTick  time.Time
 	lastCount uint64
+
+	ppsEMA       float64
+	lastPktCount uint64
 
 	portMu    sync.Mutex
 	portLines []string
@@ -180,6 +185,9 @@ func (r *Runner) updateRate() {
 	if r.lastTick.IsZero() {
 		r.lastTick = now
 		r.lastCount = count
+		if r.config.PacketsSent != nil {
+			r.lastPktCount = r.config.PacketsSent.Load()
+		}
 		return
 	}
 	delta := now.Sub(r.lastTick).Seconds()
@@ -193,6 +201,19 @@ func (r *Runner) updateRate() {
 		alpha := 0.2
 		r.rateEMA = alpha*instant + (1-alpha)*r.rateEMA
 	}
+
+	if r.config.PacketsSent != nil {
+		pktCount := r.config.PacketsSent.Load()
+		pktInstant := float64(pktCount-r.lastPktCount) / delta
+		if r.ppsEMA == 0 {
+			r.ppsEMA = pktInstant
+		} else {
+			alpha := 0.2
+			r.ppsEMA = alpha*pktInstant + (1-alpha)*r.ppsEMA
+		}
+		r.lastPktCount = pktCount
+	}
+
 	r.lastTick = now
 	r.lastCount = count
 }
@@ -219,9 +240,15 @@ func (r *Runner) refresh() {
 	fmt.Fprintf(r.stats, "Ports : %-6d [Found]\n", found)
 
 	r.progress.Clear()
+	ppsLabel := ""
+	if r.config.PPS > 0 {
+		ppsLabel = fmt.Sprintf("%.0f/%d", r.ppsEMA, r.config.PPS)
+	} else {
+		ppsLabel = fmt.Sprintf("%.0f/unlimited", r.ppsEMA)
+	}
 	fmt.Fprintf(r.progress, "%s %.2f%%\n\n", progressBar(percent, 60), percent)
-	fmt.Fprintf(r.progress, "Queued      : %-8d Rate        : %.1f hosts/s\n", queued, r.rateEMA)
-	fmt.Fprintf(r.progress, "In Progress : %-8d ETA         : %s\n", inFlight, formatETA(total, completed, r.rateEMA))
+	fmt.Fprintf(r.progress, "Queued      : %-8d Rate        : %-14s PPS : %s\n", queued, fmt.Sprintf("%.1f hosts/s", r.rateEMA), ppsLabel)
+	fmt.Fprintf(r.progress, "In Progress : %-8d ETA         : %-14s\n", inFlight, formatETA(total, completed, r.rateEMA))
 	fmt.Fprintf(r.progress, "Completed   : %-8d Concurrency : %d\n", completed, r.config.Concurrency)
 
 	r.liveMu.Lock()
