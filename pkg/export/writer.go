@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"goscanfast/pkg/models"
 )
@@ -112,6 +113,8 @@ type csvWriter struct {
 	closer     io.Closer
 	csv        *csv.Writer
 	mu         sync.Mutex
+	rowCount   int64
+	done       chan struct{}
 }
 
 func newCSVWriter(outputPath string) (Writer, error) {
@@ -134,12 +137,19 @@ func newCSVWriter(outputPath string) (Writer, error) {
 	}
 	csvw.Flush()
 
-	return &csvWriter{
+	cw := &csvWriter{
 		outputPath: outputPath,
 		file:       w,
 		closer:     closer,
 		csv:        csvw,
-	}, nil
+		done:       make(chan struct{}),
+	}
+
+	if outputPath != "" {
+		go cw.periodicFlush()
+	}
+
+	return cw, nil
 }
 
 func (w *csvWriter) Write(result models.Result) error {
@@ -157,27 +167,42 @@ func (w *csvWriter) Write(result models.Result) error {
 	}); err != nil {
 		return err
 	}
-	// No row-level flush
+	w.rowCount++
+	if w.outputPath != "" && w.rowCount%1000 == 0 {
+		w.flushLocked()
+	}
 	return nil
 }
 
+func (w *csvWriter) periodicFlush() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			w.mu.Lock()
+			w.flushLocked()
+			w.mu.Unlock()
+		case <-w.done:
+			return
+		}
+	}
+}
+
+func (w *csvWriter) flushLocked() {
+	w.csv.Flush()
+	if bw, ok := w.file.(*bufio.Writer); ok {
+		bw.Flush()
+	}
+}
+
 func (w *csvWriter) Close() error {
+	close(w.done)
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	w.csv.Flush()
-	if err := w.csv.Error(); err != nil {
-		w.closer.Close()
-		return err
-	}
-
-	// Flush buffered writer if it exists
-	if bw, ok := w.file.(*bufio.Writer); ok {
-		if err := bw.Flush(); err != nil {
-			w.closer.Close()
-			return err
-		}
-	}
+	w.flushLocked()
 
 	_ = w.closer.Close()
 
