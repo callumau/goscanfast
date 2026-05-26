@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"strings"
@@ -15,21 +16,25 @@ import (
 	"goscanfast/pkg/models"
 )
 
+// Engine orchestrates the full scan pipeline: IP generation, port scanning,
+// DNS resolution, result writing, SMB enumeration, and progress reporting.
 type Engine struct {
-	CIDRs       []string
-	Exclude     []string
-	Ports       []int
-	Concurrency int
+	CIDRs           []string
+	Exclude         []string
+	Ports           []int
+	Concurrency     int
 	PortConcurrency int
-	Timeout     time.Duration
-	Retries     int
-	Writer      export.Writer
-	SMBWriter   export.SMBWriter
-	Reporter    Reporter
-	PPS         int
-	PacketsSent *atomic.Uint64
+	Timeout         time.Duration
+	Retries         int
+	Writer          export.Writer
+	SMBWriter       export.SMBWriter
+	Reporter        Reporter
+	PPS             int
+	PacketsSent     *atomic.Uint64
 }
 
+// Reporter receives lifecycle events from the scan engine for progress
+// reporting, logging, and UI updates.
 type Reporter interface {
 	OnStart(total uint64)
 	OnHostEnqueued()
@@ -40,6 +45,7 @@ type Reporter interface {
 	OnDone()
 }
 
+// MultiReporter fans out Reporter calls to multiple implementations.
 type MultiReporter []Reporter
 
 func (m MultiReporter) OnStart(total uint64) {
@@ -98,7 +104,9 @@ func (m MultiReporter) OnDone() {
 	}
 }
 
-func (e *Engine) Run() error {
+// Run executes the scan pipeline. ctx controls the lifetime of all
+// scanning, DNS, SMB, and rate-limiting goroutines.
+func (e *Engine) Run(ctx context.Context) error {
 	if e.Concurrency <= 0 {
 		return errors.New("concurrency must be > 0")
 	}
@@ -116,7 +124,7 @@ func (e *Engine) Run() error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	if e.Reporter != nil {
@@ -127,10 +135,8 @@ func (e *Engine) Run() error {
 	resultsWriter := make(chan models.Result, e.Concurrency)
 	var ppsTicket <-chan struct{}
 	if e.PPS > 0 {
-		// Buffer a full second of tokens so workers never starve after stalls.
 		tickCh := make(chan struct{}, e.PPS)
-		// Use time-based compensation: track how many tokens SHOULD have been
-		// issued since start, issue deficit each tick. Immune to timer jitter.
+		const maxDeficitFactor = 10
 		go func() {
 			start := time.Now()
 			var issued int64
@@ -144,12 +150,16 @@ func (e *Engine) Run() error {
 					elapsed := time.Since(start)
 					target := int64(elapsed.Seconds() * float64(e.PPS))
 					deficit := target - issued
+					maxDeficit := int64(e.PPS * maxDeficitFactor)
+					if deficit > maxDeficit {
+						deficit = maxDeficit
+						issued = target - maxDeficit
+					}
 					for i := int64(0); i < deficit; i++ {
 						select {
 						case tickCh <- struct{}{}:
 							issued++
 						default:
-							// buffer full
 							issued++
 						}
 					}
@@ -159,14 +169,12 @@ func (e *Engine) Run() error {
 		ppsTicket = tickCh
 	}
 
-	// Pre-spawn workers
 	var wg sync.WaitGroup
 	var smbWG sync.WaitGroup
 	var dnsWG sync.WaitGroup
 
-	dnsJobs := make(chan models.Result, e.Concurrency)
+	dnsJobs := make(chan models.Result, e.Concurrency*2)
 
-	// DNS Workers
 	for i := 0; i < e.Concurrency/2+1; i++ {
 		dnsWG.Add(1)
 		go func() {
@@ -206,7 +214,6 @@ func (e *Engine) Run() error {
 					}
 				}
 
-				// Check for SMB port 445
 				if e.SMBWriter != nil {
 					for _, p := range openPorts {
 						if p == 445 {
@@ -233,11 +240,12 @@ func (e *Engine) Run() error {
 	go func() {
 		defer writerWG.Done()
 		for result := range resultsWriter {
-			_ = e.Writer.Write(result)
+			if err := e.Writer.Write(result); err != nil {
+				log.Printf("write error for %s: %v", result.IP, err)
+			}
 		}
 	}()
 
-	// Feeder
 	for ip := range ips {
 		jobs <- ip
 		if e.Reporter != nil {
@@ -251,7 +259,6 @@ func (e *Engine) Run() error {
 	close(resultsWriter)
 	writerWG.Wait()
 
-	// Wait for SMB tasks to finish
 	smbWG.Wait()
 
 	if e.Reporter != nil {
@@ -313,6 +320,7 @@ func lookupHostname(ip string) string {
 }
 
 func resolvedPortConcurrency(requested int, portsCount int) int {
+	const defaultMax = 64
 	if portsCount <= 0 {
 		return 0
 	}
@@ -322,7 +330,8 @@ func resolvedPortConcurrency(requested int, portsCount int) int {
 		}
 		return requested
 	}
-	// Default: scan all ports concurrently per host.
-	// Rate limiter controls overall PPS; no need to serialize port scans.
+	if portsCount > defaultMax {
+		return defaultMax
+	}
 	return portsCount
 }

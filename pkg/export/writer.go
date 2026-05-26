@@ -287,7 +287,11 @@ func mergeChunks(chunks []string, outputPath string, header []string) error {
 	current := make([][]string, len(chunks))
 
 	for i, c := range chunks {
-		files[i], _ = os.Open(c)
+		f, err := os.Open(c)
+		if err != nil {
+			return fmt.Errorf("failed to open chunk %s: %w", c, err)
+		}
+		files[i] = f
 		readers[i] = csv.NewReader(files[i])
 		rec, err := readers[i].Read()
 		if err == nil {

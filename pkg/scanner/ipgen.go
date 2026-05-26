@@ -45,6 +45,8 @@ func ipInCIDR(ip uint32, block cidrBlock) bool {
 	return ip&block.mask == block.base&block.mask
 }
 
+// GenerateIPs returns a channel that yields every IPv4 address in cidr,
+// skipping any address that falls within an exclude range.
 func GenerateIPs(cidr string, excludes []string) (<-chan net.IP, error) {
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -98,6 +100,8 @@ func GenerateIPs(cidr string, excludes []string) (<-chan net.IP, error) {
 	return ch, nil
 }
 
+// GenerateIPsMulti returns a channel yielding every IPv4 address across
+// multiple CIDRs, deduplicating overlapping ranges and skipping excludes.
 func GenerateIPsMulti(cidrs []string, excludes []string) (<-chan net.IP, error) {
 	if len(cidrs) == 0 {
 		return nil, fmt.Errorf("no CIDRs provided")
@@ -183,6 +187,7 @@ func normalizeCIDRs(cidrs []string) ([]*net.IPNet, error) {
 	return merged, nil
 }
 
+// CIDRSize returns the number of IPv4 addresses in the given CIDR.
 func CIDRSize(cidr string) uint64 {
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -205,6 +210,8 @@ func CIDRSize(cidr string) uint64 {
 	return uint64(end-start) + 1
 }
 
+// TotalCIDRSize returns the total number of IPv4 addresses across cidrs,
+// accounting for overlapping ranges.
 func TotalCIDRSize(cidrs []string) uint64 {
 	normalized, err := normalizeCIDRs(cidrs)
 	if err != nil {
@@ -222,6 +229,7 @@ func TotalCIDRSize(cidrs []string) uint64 {
 	return total
 }
 
+// CIDRRange returns the first and last IP addresses in a CIDR block.
 func CIDRRange(cidr string) (string, string, error) {
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {

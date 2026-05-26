@@ -11,6 +11,8 @@ import (
 
 var defaultPorts = []int{21, 22, 23, 25, 80, 135, 139, 161, 389, 443, 445, 636, 3389, 5985, 5986, 8080}
 
+// LoadPorts parses a port specification from a file path, inline list, or
+// returns the default port set when path is empty.
 func LoadPorts(path string) ([]int, error) {
 	if path == "" {
 		return defaultPorts, nil
@@ -37,6 +39,7 @@ func LoadPorts(path string) ([]int, error) {
 	return ports, nil
 }
 
+// LoadExcludeCIDRs reads a JSON array of CIDR strings to exclude from scanning.
 func LoadExcludeCIDRs(path string) ([]string, error) {
 	if path == "" {
 		return nil, nil
@@ -52,6 +55,7 @@ func LoadExcludeCIDRs(path string) ([]string, error) {
 	return cidrs, nil
 }
 
+// LoadTargetCIDRs reads scan targets from CLI args or a JSON file of CIDR strings.
 func LoadTargetCIDRs(args []string, path string) ([]string, error) {
 	if path != "" {
 		data, err := os.ReadFile(path)

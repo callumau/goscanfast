@@ -10,6 +10,8 @@ import (
 	"goscanfast/pkg/models"
 )
 
+// ActivityLogger implements Reporter to write timestamped progress and
+// summary information to a log file.
 type ActivityLogger struct {
 	filePath  string
 	file      *os.File
@@ -23,6 +25,7 @@ type ActivityLogger struct {
 	lastLogTime time.Time
 }
 
+// NewActivityLogger creates an ActivityLogger that appends to path.
 func NewActivityLogger(path string, cidrs []string) (*ActivityLogger, error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

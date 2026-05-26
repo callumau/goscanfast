@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"goscanfast/pkg/export"
@@ -124,7 +127,10 @@ var rootCmd = &cobra.Command{
 			PacketsSent:     &packetsSent,
 		}
 
-		return engine.Run()
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
+		return engine.Run(ctx)
 	},
 }
 

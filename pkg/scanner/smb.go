@@ -13,6 +13,8 @@ import (
 	"github.com/hirochachacha/go-smb2"
 )
 
+// EnumSMB connects to an SMB server on port 445 as Guest, enumerates
+// shares, mounts each non-administrative share, and crawls up to depth 3.
 func EnumSMB(ctx context.Context, ip, hostname string, writer export.SMBWriter, timeout time.Duration) {
 	if hostname == "" {
 		hostname = lookupHostname(ip)
@@ -29,11 +31,7 @@ func EnumSMB(ctx context.Context, ip, hostname string, writer export.SMBWriter, 
 		},
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
-	} else {
-		conn.SetDeadline(time.Now().Add(timeout))
-	}
+	conn.SetDeadline(time.Now().Add(timeout))
 
 	s, err := d.DialContext(ctx, conn)
 	if err != nil {
