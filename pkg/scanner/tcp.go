@@ -59,7 +59,9 @@ func isRetryable(err error) bool {
 		switch {
 		case errors.Is(opErr.Err, syscall.ECONNRESET),
 			errors.Is(opErr.Err, syscall.ECONNABORTED),
-			errors.Is(opErr.Err, syscall.EPIPE):
+			errors.Is(opErr.Err, syscall.EPIPE),
+			errors.Is(opErr.Err, syscall.EHOSTUNREACH),
+			errors.Is(opErr.Err, syscall.ENETUNREACH):
 			return true
 		}
 	}
