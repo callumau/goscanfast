@@ -247,7 +247,22 @@ func (e *Engine) Run(ctx context.Context) error {
 	}()
 
 	for ip := range ips {
-		jobs <- ip
+		select {
+		case jobs <- ip:
+		case <-ctx.Done():
+			close(jobs)
+			go func() { for range ips {} }()
+			wg.Wait()
+			close(dnsJobs)
+			dnsWG.Wait()
+			close(resultsWriter)
+			writerWG.Wait()
+			smbWG.Wait()
+			if e.Reporter != nil {
+				e.Reporter.OnDone()
+			}
+			return nil
+		}
 		if e.Reporter != nil {
 			e.Reporter.OnHostEnqueued()
 		}

@@ -88,6 +88,9 @@ var rootCmd = &cobra.Command{
 
 		var packetsSent atomic.Uint64
 
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
 		var tuiRunner *tui.Runner
 		if flagTUI {
 			if flagOutput == "" {
@@ -103,6 +106,7 @@ var rootCmd = &cobra.Command{
 					Concurrency: flagConcurrency,
 					PPS:         flagPPS,
 					PacketsSent: &packetsSent,
+					Cancel:      cancel,
 				})
 				reporters = append(reporters, tuiRunner.Reporter())
 				if err := tuiRunner.Start(); err != nil {
@@ -126,9 +130,6 @@ var rootCmd = &cobra.Command{
 			PPS:             flagPPS,
 			PacketsSent:     &packetsSent,
 		}
-
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
 
 		return engine.Run(ctx)
 	},

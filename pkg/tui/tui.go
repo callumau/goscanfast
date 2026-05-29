@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +23,7 @@ type Config struct {
 	Concurrency int
 	PPS         int
 	PacketsSent *atomic.Uint64
+	Cancel      context.CancelFunc
 }
 
 type Runner struct {
@@ -52,8 +55,10 @@ type Runner struct {
 	ports     *tview.TextView
 	footer    *tview.TextView
 
-	stopOnce sync.Once
-	done     chan struct{}
+	stopOnce    sync.Once
+	done        chan struct{}
+	refreshDone chan struct{}
+	appDone     chan struct{}
 }
 
 type Reporter struct {
@@ -81,7 +86,7 @@ func NewRunner(cfg Config) *Runner {
 
 	r.footer = tview.NewTextView().SetDynamicColors(true)
 	r.footer.SetBorder(false)
-	r.footer.SetText("Legend: q=quit, Ctrl+C=quit")
+	r.footer.SetText("Legend: q=quit, Ctrl+C=quit, s=kill (instant)")
 
 	grid := tview.NewGrid()
 	grid.SetRows(6, 5, 7, 0, 1)
@@ -97,7 +102,19 @@ func NewRunner(cfg Config) *Runner {
 	r.app.SetRoot(grid, true)
 	r.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyCtrlC || event.Rune() == 'q' {
-			r.Stop()
+			if r.config.Cancel != nil {
+				r.config.Cancel()
+			}
+			return nil
+		}
+		if event.Rune() == 's' {
+			if r.config.Cancel != nil {
+				r.config.Cancel()
+			}
+			go func() {
+				r.Stop()
+				os.Exit(0)
+			}()
 			return nil
 		}
 		return event
@@ -113,7 +130,9 @@ func (r *Runner) Reporter() *Reporter {
 func (r *Runner) Start() error {
 	r.lastTick = time.Now()
 	r.done = make(chan struct{})
+	r.refreshDone = make(chan struct{})
 	go func() {
+		defer close(r.refreshDone)
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -126,7 +145,9 @@ func (r *Runner) Start() error {
 			}
 		}
 	}()
+	r.appDone = make(chan struct{})
 	go func() {
+		defer close(r.appDone)
 		_ = r.app.Run()
 	}()
 	return nil
@@ -135,7 +156,13 @@ func (r *Runner) Start() error {
 func (r *Runner) Stop() {
 	r.stopOnce.Do(func() {
 		close(r.done)
+		if r.refreshDone != nil {
+			<-r.refreshDone
+		}
 		r.app.Stop()
+		if r.appDone != nil {
+			<-r.appDone
+		}
 	})
 }
 
