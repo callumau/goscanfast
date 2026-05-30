@@ -70,6 +70,7 @@ func NewRunner(cfg Config) *Runner {
 	r.app = tview.NewApplication()
 	r.header = tview.NewTextView().SetDynamicColors(true)
 	r.header.SetBorder(false)
+	r.header.SetTextAlign(tview.AlignCenter)
 	r.header.SetText(headerArt())
 
 	r.target = tview.NewTextView().SetDynamicColors(true)
@@ -391,10 +392,9 @@ func statBar(value uint64, width int) string {
 }
 
 func headerArt() string {
-	return "________        _________                        ___________              __\n" +
-		" /  _____/  ____ /   _____/ ____ _____    ____    \\_   _____/____    ______/  |_ \n" +
-		"/   \\  ___ /  _ \\\\_____  \\_/ ___\\__  \\  /    \\    |    __) \\__  \\  /  ___/\\   __\\\n" +
-		"\\    \\_\\  (  <_> )        \\  \\___ / __ \\|   |  \\   |     \\   / __ \\_\\___ \\  |  |  \n" +
-		" \\______  /\\____/_______  /\\___  >____  /___|  /   \\___  /  (____  /____  > |__|  \n" +
-		"        \\/              \\/     \\/     \\/     \\/        \\/         \\/     \\/       \n"
+	return "   ______     _____                  ______           __ \n" +
+		"  / ____/___ / ___/_________ _____  / ____/___ ______/ /_\n" +
+		" / / __/ __ \\\\__ \\/ ___/ __ `/ __ \\/ /_  / __ `/ ___/ __/\n" +
+		"/ /_/ / /_/ /__/ / /__/ /_/ / / / / __/ / /_/ (__  ) /_  \n" +
+		"\\____/\\____/____/\\___/\\__,_/_/ /_/_/    \\__,_/____/\\__/  \n"
 }
