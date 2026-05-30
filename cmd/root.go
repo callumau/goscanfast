@@ -17,6 +17,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var version = "dev"
+
 var (
 	flagExclude     string
 	flagPorts       string
@@ -33,8 +35,9 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "goscanfast <cidr> [cidr...]",
-	Short: "High-speed ICMP-first port scanner",
+	Use:     "goscanfast <cidr> [cidr...]",
+	Short:   "High-speed ICMP-first port scanner",
+	Version: version,
 	Args: func(cmd *cobra.Command, args []string) error {
 		_, err := scanner.LoadTargetCIDRs(args, flagTargets)
 		return err
