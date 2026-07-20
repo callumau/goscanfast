@@ -11,56 +11,67 @@ import (
 // spins the whole interval (busy core, exact pacing).
 const spinWindow = 300 * time.Microsecond
 
-// startPacer returns a channel delivering exactly one ticket per 1/pps
-// interval, paced against the wall clock. Two invariants are guaranteed:
+// catchUpGap is the minimum spacing between back-to-back debt repayments
+// after a stall. Small enough to recover the full rate quickly, large
+// enough that a recovery burst is not a single packet dump.
+const catchUpGap = 100 * time.Microsecond
+
+// startPacer returns a channel delivering tickets at a sustained rate of
+// pps per second, paced against the wall clock. Two invariants hold:
 //
-//  1. No bursts: consecutive ticket deliveries are always at least one
-//     full interval apart, even after scheduler stalls or a blocked send.
-//     Missed ticks are skipped, never replayed.
-//  2. Exact long-term rate: tick intervals accumulate their sub-nanosecond
-//     remainder so the sustained rate does not drift from pps.
+//  1. Never over budget: delivered(t) <= floor(t * pps) at all times, so
+//     any full one-second window carries at most pps tickets (+1 edge
+//     tick). Missed ticks accumulate as debt and are repaid at catchUpGap
+//     spacing, so jitter dips are recovered instead of lost.
+//  2. Exact long-term rate: tick k falls due at start + k/pps computed
+//     against the fixed start time, so the sustained rate cannot drift.
 //
-// Under system jitter the delivered rate can dip below pps but can never
-// exceed it. The pacer goroutine exits when ctx is canceled.
+// The pacer goroutine exits when ctx is canceled.
 func startPacer(ctx context.Context, pps int) <-chan struct{} {
-	// Unbuffered: the pacer can never have both a queued ticket and a
-	// blocked send, so a stalled consumer draining later cannot observe
-	// two deliveries closer than one interval.
+	// Unbuffered: a blocked send holds at most one owed ticket, keeping
+	// delivery accounting exact.
 	out := make(chan struct{})
 	go pace(ctx, pps, out)
 	return out
 }
 
 func pace(ctx context.Context, pps int, out chan<- struct{}) {
-	nsPerTick := int64(time.Second) / int64(pps)
-	rem := int64(time.Second) % int64(pps)
-	interval := time.Duration(nsPerTick)
-	var errAcc int64
+	nsPerSec := int64(time.Second)
+	start := time.Now()
+	var delivered int64
+	lastDelivery := start.Add(-catchUpGap)
 
-	last := time.Now()
-	next := last
+	// due returns the number of tickets owed by time t.
+	due := func(t time.Time) int64 {
+		return t.Sub(start).Nanoseconds() * int64(pps) / nsPerSec
+	}
+	// deadline returns the wall time at which ticket k falls due.
+	deadline := func(k int64) time.Time {
+		return start.Add(time.Duration(k * nsPerSec / int64(pps)))
+	}
+
 	for {
-		next = next.Add(interval)
-		errAcc += rem
-		if errAcc >= int64(pps) {
-			errAcc -= int64(pps)
-			next = next.Add(time.Nanosecond)
+		now := time.Now()
+		if delivered < due(now) {
+			// Behind schedule: repay one debt tick now, throttled by
+			// catchUpGap against the last actual delivery. Never exceeds
+			// delivered(t) <= t * pps, so the per-second budget holds.
+			sleepUntil(lastDelivery.Add(catchUpGap))
+		} else {
+			// On schedule: wait for the next regular tick. If that tick
+			// is already past due, still throttle against catchUpGap so
+			// debt repayment never becomes a micro-burst.
+			next := deadline(delivered + 1)
+			if min := lastDelivery.Add(catchUpGap); next.Before(min) {
+				next = min
+			}
+			sleepUntil(next)
 		}
-		// Never schedule less than one interval after the last actual
-		// delivery, regardless of how long the previous send blocked.
-		if min := last.Add(interval); next.Before(min) {
-			next = min
-		}
-		// Behind schedule: snap to now, skipping missed ticks.
-		if now := time.Now(); now.After(next) {
-			next = now
-		}
-
-		sleepUntil(next)
 
 		select {
 		case out <- struct{}{}:
-			last = time.Now()
+			delivered++
+			lastDelivery = time.Now()
 		case <-ctx.Done():
 			return
 		}

@@ -6,30 +6,33 @@ import (
 	"time"
 )
 
-// TestPacer_NoBurst verifies tickets are always at least one interval apart.
-func TestPacer_NoBurst(t *testing.T) {
+// TestPacer_NeverOverBudget verifies no trailing one-second window ever
+// carries more than pps (+2 slack for edge ticks and measurement slop).
+func TestPacer_NeverOverBudget(t *testing.T) {
 	const pps = 500
-	interval := time.Second / pps
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tickets := startPacer(ctx, pps)
 
-	var prev time.Time
-	for i := 0; i < 50; i++ {
+	var times []time.Time
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
 		select {
 		case <-tickets:
+			times = append(times, time.Now())
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for ticket")
 		}
-		now := time.Now()
-		if !prev.IsZero() {
-			gap := now.Sub(prev)
-			if gap < interval*9/10 {
-				t.Fatalf("ticket %d arrived %v after previous, want >= ~%v (burst)", i, gap, interval)
-			}
+	}
+	for i, ts := range times {
+		count := 1
+		for j := i - 1; j >= 0 && ts.Sub(times[j]) <= time.Second; j-- {
+			count++
 		}
-		prev = now
+		if count > pps+2 {
+			t.Fatalf("ticket %d: %d tickets in trailing second, budget %d", i, count, pps)
+		}
 	}
 }
 
@@ -61,15 +64,18 @@ func TestPacer_SustainedRate(t *testing.T) {
 	}
 }
 
-// TestPacer_NoCatchUpAfterStall verifies that after the consumer stalls,
-// the pacer resumes at normal spacing instead of bursting missed tickets.
-func TestPacer_NoCatchUpAfterStall(t *testing.T) {
+// TestPacer_CatchUpAfterStall verifies missed ticks are repaid (the rate
+// recovers after a consumer stall) while never exceeding the per-second
+// budget. Micro-spacing is enforced sender-side (catchUpGap); receiver
+// timestamps cannot measure it reliably, so only the budget is asserted.
+func TestPacer_CatchUpAfterStall(t *testing.T) {
 	const pps = 1000
 	interval := time.Second / pps
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	tickets := startPacer(ctx, pps)
+	start := time.Now()
 
 	// Drain a few, then stall the consumer for 50 intervals.
 	for i := 0; i < 5; i++ {
@@ -77,18 +83,26 @@ func TestPacer_NoCatchUpAfterStall(t *testing.T) {
 	}
 	time.Sleep(50 * interval)
 
-	// After the stall, deliveries must still be spaced >= one interval.
-	var prev time.Time
-	for i := 0; i < 20; i++ {
+	// After the stall, debt must be repaid fast, and no trailing
+	// one-second window may carry more than pps (+2 slack) tickets.
+	var times []time.Time
+	for i := 0; i < 200; i++ {
 		<-tickets
-		now := time.Now()
-		if !prev.IsZero() {
-			gap := now.Sub(prev)
-			if gap < interval*9/10 {
-				t.Fatalf("post-stall ticket %d arrived %v after previous (catch-up burst)", i, gap)
-			}
+		times = append(times, time.Now())
+	}
+	for i, ts := range times {
+		count := 1
+		for j := i - 1; j >= 0 && ts.Sub(times[j]) <= time.Second; j-- {
+			count++
 		}
-		prev = now
+		if count > pps+2 {
+			t.Fatalf("ticket %d: %d tickets in trailing second, budget %d", i, count, pps)
+		}
+	}
+	// Debt repaid: 205 tickets at pps take 205ms on the ideal schedule.
+	// Without catch-up the 50ms stall is lost: ~250ms. Allow 25ms slack.
+	if elapsed := time.Since(start); elapsed > 230*time.Millisecond {
+		t.Fatalf("debt not repaid: 205 tickets took %v", elapsed)
 	}
 }
 
