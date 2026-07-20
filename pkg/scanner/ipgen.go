@@ -229,6 +229,63 @@ func TotalCIDRSize(cidrs []string) uint64 {
 	return total
 }
 
+// TotalScannableHosts returns the number of IPs across cidrs that remain
+// after subtracting any address covered by excludes. Returns 0 on any
+// parse error (callers surface the error via GenerateIPsMulti).
+func TotalScannableHosts(cidrs, excludes []string) uint64 {
+	normalized, err := normalizeCIDRs(cidrs)
+	if err != nil {
+		return 0
+	}
+	excludeBlocks, err := parseCIDRList(excludes)
+	if err != nil {
+		return 0
+	}
+
+	// Build merged exclude intervals in uint64 space so 255.255.255.255+1
+	// cannot overflow.
+	intervals := make([][2]uint64, 0, len(excludeBlocks))
+	for _, b := range excludeBlocks {
+		intervals = append(intervals, [2]uint64{
+			uint64(b.base & b.mask),
+			uint64(b.base | ^b.mask),
+		})
+	}
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i][0] < intervals[j][0] })
+	merged := make([][2]uint64, 0, len(intervals))
+	for _, iv := range intervals {
+		if n := len(merged); n > 0 && iv[0] <= merged[n-1][1]+1 {
+			if iv[1] > merged[n-1][1] {
+				merged[n-1][1] = iv[1]
+			}
+			continue
+		}
+		merged = append(merged, iv)
+	}
+
+	var total uint64
+	for _, cidr := range normalized {
+		baseIP := cidr.IP.To4()
+		mask := net.IP(cidr.Mask).To4()
+		lo := uint64(IpToUint32(baseIP))
+		hi := uint64(IpToUint32(baseIP) | ^IpToUint32(mask))
+		size := hi - lo + 1
+		for _, ex := range merged {
+			if ex[1] < lo {
+				continue
+			}
+			if ex[0] > hi {
+				break
+			}
+			ovLo := max(lo, ex[0])
+			ovHi := min(hi, ex[1])
+			size -= ovHi - ovLo + 1
+		}
+		total += size
+	}
+	return total
+}
+
 // CIDRRange returns the first and last IP addresses in a CIDR block.
 func CIDRRange(cidr string) (string, string, error) {
 	_, ipnet, err := net.ParseCIDR(cidr)

@@ -83,21 +83,21 @@ Also try a small slice (e.g., a /24) first to confirm consistency before scaling
 - `--format`: `csv` (default) or `json`.
 - `--output`: Output file (required for TUI).
 - `--concurrency`: Max concurrent workers (default 128).
-- `--pps`: Max packets per second (default 800). Set `0` for unlimited.
+- `--pps`: Max connection attempts per second, smoothly paced with no bursts (default 800). Set `0` for unlimited.
 - `--timeout`: Per-port timeout (default 0.5s).
 - `--retries`: Retries per port (default 1). Retries count toward PPS.
-- `--port-concurrency`: Max concurrent ports per host (default: all ports). Only reduce for very large port lists (1000+) to limit goroutine count.
+- `--port-concurrency`: Max concurrent ports per host (default 0 = auto: all ports, capped at 64). Only reduce for very large port lists (1000+) to limit goroutine count.
 - `--tui`: Enable/disable TUI (default true).
-- `--targets`: JSON file with CIDR targets.
- - `--targets`: Path to JSON file containing array of CIDR strings (e.g. targets.json). File must be valid JSON array of CIDR strings (no comments).
+- `--targets`: Path to JSON file containing array of CIDR strings (e.g. targets.json). File must be valid JSON array of CIDR strings (no comments).
 
 ## Performance Recommendations
 
-The rate limiter (`--pps`) is the primary throughput control. To get actual PPS close to the limit:
+The rate limiter (`--pps`) is the primary throughput control. It is a strict pacer, not a token bucket: connection attempts are spaced exactly `1/pps` apart with no bursts, and the sustained rate never exceeds the limit (important when a firewall drops everything above it). To keep actual PPS at the limit, enough workers must be waiting on pacer tickets at all times:
 
-- **Don't restrict `--port-concurrency`** unless scanning 1000+ ports. The default (all ports concurrent per host) ensures enough goroutines are waiting for rate-limit tokens. Setting this too low (e.g. 3) starves the rate limiter and actual PPS will sit well below the limit.
+- **Don't restrict `--port-concurrency`** unless scanning 1000+ ports. The default (up to 64 ports concurrent per host) keeps enough goroutines waiting for pacer tickets. Setting this too low (e.g. 3) starves the pacer and actual PPS will sit below the limit.
 - **`--concurrency`** controls host-level parallelism. Default 128 is good for most scans. Increase if scanning few ports per host with high PPS targets.
-- **Rule of thumb**: `concurrency × port-concurrency × 2` (for retries) should be at least 2-3× your `--pps` value to avoid throughput bottlenecks.
+- **Rule of thumb**: `concurrency × port-concurrency` should be at least 2-3× your `--pps` value to avoid throughput bottlenecks. Retries also consume pacer tickets.
+- After a stall (CPU starvation, scheduling delay) the pacer resumes at the configured rate instead of bursting to catch up, so the instantaneous rate may dip but never spikes.
 
 Example for maximum throughput at 800 PPS with default ports:
 
@@ -169,7 +169,7 @@ The TUI shows:
  - Recent port findings
  - Packets/sec (current/limit)
 
-Quit with `q` or `Ctrl+C`.
+Quit with `q` or `Ctrl+C` (graceful: results are flushed and sorted). `s` requests a graceful stop and force-exits only if teardown hangs for more than 3s.
 
 ## Tests
 

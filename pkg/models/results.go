@@ -6,12 +6,3 @@ type Result struct {
 	Hostname string
 	Ports    []int
 }
-
-// SMBResult holds an SMB enumeration entry for a share, path, or error.
-type SMBResult struct {
-	IP       string
-	Hostname string
-	Share    string
-	Path     string
-	Type     string // "Directory", "File", "ERROR", or "NONE"
-}

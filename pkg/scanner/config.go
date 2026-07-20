@@ -33,10 +33,30 @@ func LoadPorts(path string) ([]int, error) {
 	if err := json.Unmarshal(data, &ports); err != nil {
 		return nil, fmt.Errorf("ports JSON must be an array of integers: %w", err)
 	}
-	if len(ports) == 0 {
-		return nil, errors.New("ports JSON must not be empty")
+	return normalizePorts(ports)
+}
+
+// normalizePorts validates port ranges, drops duplicates while preserving
+// order, and rejects an empty result. Applied to every source (default,
+// inline list, JSON file, Engine field) so invalid ports never consume
+// PPS budget on dials that can never succeed.
+func normalizePorts(ports []int) ([]int, error) {
+	seen := make(map[int]struct{}, len(ports))
+	out := make([]int, 0, len(ports))
+	for _, p := range ports {
+		if p <= 0 || p > 65535 {
+			return nil, fmt.Errorf("invalid port: %d", p)
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
 	}
-	return ports, nil
+	if len(out) == 0 {
+		return nil, errors.New("ports list must not be empty")
+	}
+	return out, nil
 }
 
 // LoadExcludeCIDRs reads a JSON array of CIDR strings to exclude from scanning.
@@ -100,13 +120,10 @@ func parsePortList(value string) ([]int, error) {
 			continue
 		}
 		port, err := strconv.Atoi(trimmed)
-		if err != nil || port <= 0 || port > 65535 {
+		if err != nil {
 			return nil, fmt.Errorf("invalid port: %q", trimmed)
 		}
 		ports = append(ports, port)
 	}
-	if len(ports) == 0 {
-		return nil, errors.New("ports list must not be empty")
-	}
-	return ports, nil
+	return normalizePorts(ports)
 }

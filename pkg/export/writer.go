@@ -22,11 +22,6 @@ type Writer interface {
 	Close() error
 }
 
-type SMBWriter interface {
-	WriteSMB(models.SMBResult) error
-	Close() error
-}
-
 func NewWriter(format, outputPath string) (Writer, error) {
 	switch strings.ToLower(format) {
 	case "csv":
@@ -38,7 +33,19 @@ func NewWriter(format, outputPath string) (Writer, error) {
 	}
 }
 
-func NewSMBCSVWriter(outputPath string) (SMBWriter, error) {
+type csvWriter struct {
+	outputPath string
+	buf        *bufio.Writer
+	closer     io.Closer
+	csv        *csv.Writer
+	mu         sync.Mutex
+	rowCount   int64
+	done       chan struct{}
+	closeOnce  sync.Once
+	closeErr   error
+}
+
+func newCSVWriter(outputPath string) (Writer, error) {
 	var w io.Writer = os.Stdout
 	var closer io.Closer = io.NopCloser(nil)
 	if outputPath != "" {
@@ -46,86 +53,6 @@ func NewSMBCSVWriter(outputPath string) (SMBWriter, error) {
 		if err != nil {
 			return nil, err
 		}
-		w = file
-		closer = file
-	}
-
-	csvw := csv.NewWriter(w)
-	if err := csvw.Write([]string{"ip", "hostname", "share", "path", "type"}); err != nil {
-		closer.Close()
-		return nil, err
-	}
-	csvw.Flush()
-
-	return &smbCSVWriter{
-		outputPath: outputPath,
-		file:       w,
-		closer:     closer,
-		csv:        csvw,
-	}, nil
-}
-
-type smbCSVWriter struct {
-	outputPath string
-	file       io.Writer
-	closer     io.Closer
-	csv        *csv.Writer
-	mu         sync.Mutex
-}
-
-func (w *smbCSVWriter) WriteSMB(result models.SMBResult) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if err := w.csv.Write([]string{
-		result.IP,
-		result.Hostname,
-		result.Share,
-		result.Path,
-		result.Type,
-	}); err != nil {
-		return err
-	}
-	w.csv.Flush()
-	return w.csv.Error()
-}
-
-func (w *smbCSVWriter) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	w.csv.Flush()
-	if err := w.csv.Error(); err != nil {
-		w.closer.Close()
-		return err
-	}
-	_ = w.closer.Close()
-
-	if w.outputPath != "" {
-		return sortCSV(w.outputPath)
-	}
-	return nil
-}
-
-type csvWriter struct {
-	outputPath string
-	file       io.Writer
-	closer     io.Closer
-	csv        *csv.Writer
-	mu         sync.Mutex
-	rowCount   int64
-	done       chan struct{}
-}
-
-func newCSVWriter(outputPath string) (Writer, error) {
-	var w io.Writer = os.Stdout
-	var closer io.Closer = io.NopCloser(nil)
-	if outputPath != "" {
-		file, err := os.Create(outputPath)
-		if err != nil {
-			return nil, err
-		}
-		// Use buffered writer for file output
 		w = bufio.NewWriterSize(file, 64*1024)
 		closer = file
 	}
@@ -136,13 +63,19 @@ func newCSVWriter(outputPath string) (Writer, error) {
 		return nil, err
 	}
 	csvw.Flush()
+	if err := csvw.Error(); err != nil {
+		closer.Close()
+		return nil, err
+	}
 
 	cw := &csvWriter{
 		outputPath: outputPath,
-		file:       w,
 		closer:     closer,
 		csv:        csvw,
 		done:       make(chan struct{}),
+	}
+	if bw, ok := w.(*bufio.Writer); ok {
+		cw.buf = bw
 	}
 
 	if outputPath != "" {
@@ -169,7 +102,7 @@ func (w *csvWriter) Write(result models.Result) error {
 	}
 	w.rowCount++
 	if w.outputPath != "" && w.rowCount%1000 == 0 {
-		w.flushLocked()
+		return w.flushLocked()
 	}
 	return nil
 }
@@ -181,7 +114,7 @@ func (w *csvWriter) periodicFlush() {
 		select {
 		case <-ticker.C:
 			w.mu.Lock()
-			w.flushLocked()
+			_ = w.flushLocked()
 			w.mu.Unlock()
 		case <-w.done:
 			return
@@ -189,40 +122,46 @@ func (w *csvWriter) periodicFlush() {
 	}
 }
 
-func (w *csvWriter) flushLocked() {
+func (w *csvWriter) flushLocked() error {
 	w.csv.Flush()
-	if bw, ok := w.file.(*bufio.Writer); ok {
-		bw.Flush()
+	if err := w.csv.Error(); err != nil {
+		return err
 	}
-}
-
-func (w *csvWriter) Close() error {
-	close(w.done)
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	w.flushLocked()
-
-	_ = w.closer.Close()
-
-	if w.outputPath != "" {
-		return sortCSV(w.outputPath)
+	if w.buf != nil {
+		return w.buf.Flush()
 	}
 	return nil
+}
+
+// Close flushes and closes the output, then sorts a file-backed CSV by IP.
+// It is safe to call more than once; only the first call has an effect.
+func (w *csvWriter) Close() error {
+	w.closeOnce.Do(func() {
+		close(w.done)
+
+		w.mu.Lock()
+		flushErr := w.flushLocked()
+		closeErr := w.closer.Close()
+		w.mu.Unlock()
+
+		switch {
+		case flushErr != nil:
+			w.closeErr = flushErr
+		case closeErr != nil:
+			w.closeErr = closeErr
+		case w.outputPath != "":
+			w.closeErr = sortCSV(w.outputPath)
+		}
+	})
+	return w.closeErr
 }
 
 func sortCSV(path string) error {
 	return externalSort(path)
 }
 
-type row struct {
-	ip    uint32
-	lines []string
-}
-
 func externalSort(path string) error {
-	const chunkSize = 100000 // Adjust based on memory
+	const chunkSize = 100000
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -232,19 +171,19 @@ func externalSort(path string) error {
 	reader := csv.NewReader(f)
 	header, err := reader.Read()
 	if err != nil {
-		return err
+		return fmt.Errorf("reading header: %w", err)
 	}
 
 	var chunks []string
 	for {
 		var chunkData [][]string
-		for i := 0; i < chunkSize; i++ {
+		for range chunkSize {
 			rec, err := reader.Read()
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
-				return err
+				return fmt.Errorf("reading row: %w", err)
 			}
 			chunkData = append(chunkData, rec)
 		}
@@ -252,37 +191,41 @@ func externalSort(path string) error {
 			break
 		}
 
-		// Sort chunk
-		// We need ipToUint32 but it's in scanner package. 
-		// We'll use a local copy or net.ParseIP.
 		sort.Slice(chunkData, func(i, j int) bool {
-			return ipLess(chunkData[i][0], chunkData[j][0])
+			return parseIP(chunkData[i][0]) < parseIP(chunkData[j][0])
 		})
 
-		// Write chunk to tmp file
 		cf, err := os.CreateTemp("", "goscanfast-chunk-*.csv")
 		if err != nil {
 			return err
 		}
 		cw := csv.NewWriter(cf)
+		writeErr := error(nil)
 		for _, r := range chunkData {
-			_ = cw.Write(r)
+			if err := cw.Write(r); err != nil {
+				writeErr = err
+				break
+			}
 		}
 		cw.Flush()
-		cf.Close()
+		if writeErr == nil {
+			writeErr = cw.Error()
+		}
+		if cerr := cf.Close(); writeErr == nil {
+			writeErr = cerr
+		}
+		if writeErr != nil {
+			os.Remove(cf.Name())
+			return fmt.Errorf("writing sort chunk: %w", writeErr)
+		}
 		chunks = append(chunks, cf.Name())
 	}
 
-	// Merge chunks
 	return mergeChunks(chunks, path, header)
 }
 
-func ipLess(ip1, ip2 string) bool {
-	i1 := parseIP(ip1)
-	i2 := parseIP(ip2)
-	return i1 < i2
-}
-
+// parseIP converts a dotted-quad string to uint32 for ordering.
+// Unparseable input sorts first.
 func parseIP(s string) uint32 {
 	ip := net.ParseIP(s).To4()
 	if ip == nil {
@@ -291,7 +234,7 @@ func parseIP(s string) uint32 {
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
 }
 
-func mergeChunks(chunks []string, outputPath string, header []string) error {
+func mergeChunks(chunks []string, outputPath string, header []string) (retErr error) {
 	defer func() {
 		for _, c := range chunks {
 			os.Remove(c)
@@ -302,26 +245,39 @@ func mergeChunks(chunks []string, outputPath string, header []string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); retErr == nil {
+			retErr = cerr
+		}
+	}()
 
 	w := csv.NewWriter(f)
-	_ = w.Write(header)
+	if err := w.Write(header); err != nil {
+		return err
+	}
 
-	files := make([]*os.File, len(chunks))
-	readers := make([]*csv.Reader, len(chunks))
-	current := make([][]string, len(chunks))
+	files := make([]*os.File, 0, len(chunks))
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	readers := make([]*csv.Reader, 0, len(chunks))
+	current := make([][]string, 0, len(chunks))
 
-	for i, c := range chunks {
-		f, err := os.Open(c)
+	for _, c := range chunks {
+		cf, err := os.Open(c)
 		if err != nil {
 			return fmt.Errorf("failed to open chunk %s: %w", c, err)
 		}
-		files[i] = f
-		readers[i] = csv.NewReader(files[i])
-		rec, err := readers[i].Read()
-		if err == nil {
-			current[i] = rec
+		files = append(files, cf)
+		r := csv.NewReader(cf)
+		readers = append(readers, r)
+		rec, err := r.Read()
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("reading chunk %s: %w", c, err)
 		}
+		current = append(current, rec)
 	}
 
 	for {
@@ -342,20 +298,21 @@ func mergeChunks(chunks []string, outputPath string, header []string) error {
 			break
 		}
 
-		_ = w.Write(current[minIdx])
+		if err := w.Write(current[minIdx]); err != nil {
+			return err
+		}
 		rec, err := readers[minIdx].Read()
-		if err != nil {
+		if err == io.EOF {
 			current[minIdx] = nil
+		} else if err != nil {
+			return fmt.Errorf("reading chunk: %w", err)
 		} else {
 			current[minIdx] = rec
 		}
 	}
 
 	w.Flush()
-	for _, f := range files {
-		f.Close()
-	}
-	return nil
+	return w.Error()
 }
 
 type jsonWriter struct {
@@ -369,7 +326,7 @@ func newJSONWriter(outputPath string) (Writer, error) {
 	var w io.Writer = os.Stdout
 	var closer io.Closer = io.NopCloser(nil)
 	if outputPath != "" {
-		file, err := os.Create(outputPath)
+		file, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return nil, err
 		}

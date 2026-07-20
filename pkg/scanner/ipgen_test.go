@@ -45,3 +45,38 @@ func TestGenerateIPsMulti_Overlap(t *testing.T) {
 		t.Errorf("expected 256 unique IPs, got %d", count)
 	}
 }
+
+func TestTotalScannableHosts(t *testing.T) {
+	cases := []struct {
+		name     string
+		cidrs    []string
+		excludes []string
+		want     uint64
+	}{
+		{"no excludes", []string{"10.0.0.0/30"}, nil, 4},
+		{"exclude half", []string{"10.0.0.0/30"}, []string{"10.0.0.0/31"}, 2},
+		{"exclude all", []string{"10.0.0.0/30"}, []string{"10.0.0.0/30"}, 0},
+		{"exclude superset", []string{"10.0.0.0/24"}, []string{"10.0.0.0/16"}, 0},
+		{"exclude outside range", []string{"10.0.0.0/30"}, []string{"192.168.0.0/24"}, 4},
+		{"exclude spanning two blocks", []string{"10.0.0.0/25", "10.0.0.128/25"}, []string{"10.0.0.0/24"}, 0},
+		{"overlapping excludes", []string{"10.0.0.0/24"}, []string{"10.0.0.0/25", "10.0.0.64/26"}, 128},
+		{"exclude at 255 boundary", []string{"10.0.0.248/29"}, []string{"10.0.0.255/32"}, 7},
+		{"overlapping includes deduped", []string{"10.0.0.0/24", "10.0.0.0/30"}, nil, 256},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TotalScannableHosts(tc.cidrs, tc.excludes); got != tc.want {
+				t.Fatalf("TotalScannableHosts(%v, %v) = %d, want %d", tc.cidrs, tc.excludes, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTotalScannableHosts_Invalid(t *testing.T) {
+	if got := TotalScannableHosts([]string{"bogus"}, nil); got != 0 {
+		t.Fatalf("expected 0 for invalid CIDR, got %d", got)
+	}
+	if got := TotalScannableHosts([]string{"10.0.0.0/24"}, []string{"bogus"}); got != 0 {
+		t.Fatalf("expected 0 for invalid exclude, got %d", got)
+	}
+}

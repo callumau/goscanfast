@@ -19,7 +19,7 @@ func ScanPort(ctx context.Context, ip string, port int, timeout time.Duration, r
 	attempts := retries + 1
 	addr := net.JoinHostPort(ip, formatPort(port))
 	dialer := &net.Dialer{Timeout: timeout}
-	for i := 0; i < attempts; i++ {
+	for i := range attempts {
 		if ppsTicket != nil {
 			select {
 			case <-ppsTicket:
@@ -44,7 +44,11 @@ func ScanPort(ctx context.Context, ip string, port int, timeout time.Duration, r
 			return false
 		}
 		if i < attempts-1 {
-			time.Sleep(time.Duration(i+1) * 25 * time.Millisecond)
+			select {
+			case <-time.After(time.Duration(i+1) * 25 * time.Millisecond):
+			case <-ctx.Done():
+				return false
+			}
 		}
 	}
 	return false
@@ -56,12 +60,13 @@ func isRetryable(err error) bool {
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
+		// Transient errors only. EHOSTUNREACH/ENETUNREACH are
+		// deterministic routing failures: retrying them never
+		// succeeds and only burns PPS budget.
 		switch {
 		case errors.Is(opErr.Err, syscall.ECONNRESET),
 			errors.Is(opErr.Err, syscall.ECONNABORTED),
-			errors.Is(opErr.Err, syscall.EPIPE),
-			errors.Is(opErr.Err, syscall.EHOSTUNREACH),
-			errors.Is(opErr.Err, syscall.ENETUNREACH):
+			errors.Is(opErr.Err, syscall.EPIPE):
 			return true
 		}
 	}

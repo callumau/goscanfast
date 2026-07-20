@@ -13,21 +13,21 @@ import (
 // ActivityLogger implements Reporter to write timestamped progress and
 // summary information to a log file.
 type ActivityLogger struct {
-	filePath  string
-	file      *os.File
-	mu        sync.Mutex
-	startTime time.Time
-	total     uint64
-	completed uint64
-	found     uint64
-	alive     uint64
-	cidrs     []string
+	filePath    string
+	file        *os.File
+	mu          sync.Mutex
+	startTime   time.Time
+	total       uint64
+	completed   uint64
+	found       uint64
+	alive       uint64
+	cidrs       []string
 	lastLogTime time.Time
 }
 
 // NewActivityLogger creates an ActivityLogger that appends to path.
 func NewActivityLogger(path string, cidrs []string) (*ActivityLogger, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (l *ActivityLogger) reportProgress(completed uint64) {
 	l.mu.Unlock()
 	total := atomic.LoadUint64(&l.total)
 	rate := float64(completed) / elapsed.Seconds()
-	
+
 	var eta string
 	if total > completed && rate > 0 {
 		remaining := float64(total - completed)
@@ -96,7 +96,7 @@ func (l *ActivityLogger) reportProgress(completed uint64) {
 		percent = (float64(completed) / float64(total)) * 100
 	}
 
-	l.log(fmt.Sprintf("Progress: %d/%d (%.2f%%) | Rate: %.1f hosts/s | ETA: %s", 
+	l.log(fmt.Sprintf("Progress: %d/%d (%.2f%%) | Rate: %.1f hosts/s | ETA: %s",
 		completed, total, percent, rate, eta))
 }
 
@@ -113,9 +113,9 @@ func (l *ActivityLogger) OnDone() {
 	completed := atomic.LoadUint64(&l.completed)
 	alive := atomic.LoadUint64(&l.alive)
 	found := atomic.LoadUint64(&l.found)
-	
+
 	l.log("Scan finished.")
-	l.log(fmt.Sprintf("Summary: Duration: %s | Total: %d | Alive: %d | Ports Found: %d", 
+	l.log(fmt.Sprintf("Summary: Duration: %s | Total: %d | Alive: %d | Ports Found: %d",
 		elapsed.Round(time.Second), completed, alive, found))
 }
 

@@ -20,29 +20,28 @@ import (
 var version = "dev"
 
 var (
-	flagExclude     string
-	flagPorts       string
-	flagFormat      string
-	flagOutput      string
-	flagConcurrency int
-	flagTimeout     time.Duration
-	flagTUI         bool
-	flagPPS         int
-	flagTargets     string
+	flagExclude         string
+	flagPorts           string
+	flagFormat          string
+	flagOutput          string
+	flagConcurrency     int
+	flagTimeout         time.Duration
+	flagTUI             bool
+	flagPPS             int
+	flagTargets         string
 	flagPortConcurrency int
-	flagRetries     int
-	flagSMBOutput   string
+	flagRetries         int
 )
 
 var rootCmd = &cobra.Command{
 	Use:     "goscanfast <cidr> [cidr...]",
-	Short:   "High-speed ICMP-first port scanner",
+	Short:   "High-speed TCP connect port scanner",
 	Version: version,
 	Args: func(cmd *cobra.Command, args []string) error {
 		_, err := scanner.LoadTargetCIDRs(args, flagTargets)
 		return err
 	},
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 		cidrs, err := scanner.LoadTargetCIDRs(args, flagTargets)
 		if err != nil {
 			return err
@@ -61,24 +60,13 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer writer.Close()
-
-		var smbWriter export.SMBWriter
-		for _, p := range ports {
-			if p == 445 {
-				var err error
-			smbOutput := flagSMBOutput
-			if smbOutput == "" {
-				smbOutput = "smb-results.csv"
+		// Close flushes buffers and sorts the CSV; a failure here means
+		// the results file may be incomplete, so it must surface.
+		defer func() {
+			if cerr := writer.Close(); cerr != nil && retErr == nil {
+				retErr = fmt.Errorf("closing output: %w", cerr)
 			}
-			smbWriter, err = export.NewSMBCSVWriter(smbOutput)
-			if err != nil {
-				return fmt.Errorf("failed to create %s: %w", smbOutput, err)
-				}
-				defer smbWriter.Close()
-				break
-			}
-		}
+		}()
 
 		activityLogger, err := scanner.NewActivityLogger("activity.log", cidrs)
 		if err != nil {
@@ -99,7 +87,7 @@ var rootCmd = &cobra.Command{
 			if flagOutput == "" {
 				fmt.Fprintln(os.Stderr, "tui disabled: use --output to avoid stdout conflicts")
 			} else {
-				total := scanner.TotalCIDRSize(cidrs)
+				total := scanner.TotalScannableHosts(cidrs, excludes)
 				firstStart, firstEnd, _ := scanner.CIDRRange(cidrs[0])
 				tuiRunner = tui.NewRunner(tui.Config{
 					CIDR:        strings.Join(cidrs, ", "),
@@ -111,11 +99,14 @@ var rootCmd = &cobra.Command{
 					PacketsSent: &packetsSent,
 					Cancel:      cancel,
 				})
-				reporters = append(reporters, tuiRunner.Reporter())
 				if err := tuiRunner.Start(); err != nil {
-					return err
+					// No terminal (piped/headless): scan must not die
+					// because the UI could not start.
+					fmt.Fprintf(os.Stderr, "tui unavailable (%v); continuing without it\n", err)
+				} else {
+					reporters = append(reporters, tuiRunner.Reporter())
+					defer tuiRunner.Stop()
 				}
-				defer tuiRunner.Stop()
 			}
 		}
 
@@ -128,7 +119,6 @@ var rootCmd = &cobra.Command{
 			Timeout:         flagTimeout,
 			Retries:         flagRetries,
 			Writer:          writer,
-			SMBWriter:       smbWriter,
 			Reporter:        reporters,
 			PPS:             flagPPS,
 			PacketsSent:     &packetsSent,
@@ -147,17 +137,16 @@ func Execute() {
 
 func init() {
 	rootCmd.Flags().StringVar(&flagExclude, "exclude", "", "Path to JSON file with CIDR ranges to exclude")
-	rootCmd.Flags().StringVar(&flagPorts, "ports", "", "Path to JSON file with ports array")
+	rootCmd.Flags().StringVar(&flagPorts, "ports", "", "Path to JSON file with ports array or comma-separated list")
 	rootCmd.Flags().StringVar(&flagFormat, "format", "csv", "Output format: csv or json")
 	rootCmd.Flags().StringVar(&flagOutput, "output", "", "Output file (default stdout)")
 	rootCmd.Flags().IntVar(&flagConcurrency, "concurrency", 128, "Max concurrent workers")
 	rootCmd.Flags().DurationVar(&flagTimeout, "timeout", 500*time.Millisecond, "Per-port timeout")
 	rootCmd.Flags().BoolVar(&flagTUI, "tui", true, "Show TUI progress (requires --output)")
-	rootCmd.Flags().IntVar(&flagPPS, "pps", 800, "Max packets per second (0=unlimited)")
+	rootCmd.Flags().IntVar(&flagPPS, "pps", 800, "Max packets per second, smoothly paced with no bursts (0=unlimited)")
 	rootCmd.Flags().StringVar(&flagTargets, "targets", "", "Path to JSON file with CIDR targets")
 	rootCmd.Flags().IntVar(&flagPortConcurrency, "port-concurrency", 0, "Max concurrent ports per host (0=auto)")
 	rootCmd.Flags().IntVar(&flagRetries, "retries", 1, "Retries per port (0=disable)")
-	rootCmd.Flags().StringVar(&flagSMBOutput, "smb-output", "", "SMB results output file (default smb-results.csv)")
 
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)

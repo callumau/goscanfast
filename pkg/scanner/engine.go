@@ -17,7 +17,7 @@ import (
 )
 
 // Engine orchestrates the full scan pipeline: IP generation, port scanning,
-// DNS resolution, result writing, SMB enumeration, and progress reporting.
+// DNS resolution, result writing, and progress reporting.
 type Engine struct {
 	CIDRs           []string
 	Exclude         []string
@@ -27,7 +27,6 @@ type Engine struct {
 	Timeout         time.Duration
 	Retries         int
 	Writer          export.Writer
-	SMBWriter       export.SMBWriter
 	Reporter        Reporter
 	PPS             int
 	PacketsSent     *atomic.Uint64
@@ -35,6 +34,11 @@ type Engine struct {
 
 // Reporter receives lifecycle events from the scan engine for progress
 // reporting, logging, and UI updates.
+//
+// Methods may be called concurrently from many worker goroutines;
+// implementations must be goroutine-safe. OnStart is called once before
+// workers start and OnDone once after all work drains; every other method
+// can race with itself.
 type Reporter interface {
 	OnStart(total uint64)
 	OnHostEnqueued()
@@ -104,8 +108,16 @@ func (m MultiReporter) OnDone() {
 	}
 }
 
+// maxScanHosts bounds a single scan so progress accounting and UI totals
+// stay in uint64-comfortable ranges.
+const maxScanHosts = 1 << 24
+
+// dnsTimeout bounds a single reverse-DNS lookup so a slow resolver cannot
+// stall the pipeline or hang shutdown.
+const dnsTimeout = 3 * time.Second
+
 // Run executes the scan pipeline. ctx controls the lifetime of all
-// scanning, DNS, SMB, and rate-limiting goroutines.
+// scanning, DNS, and rate-limiting goroutines.
 func (e *Engine) Run(ctx context.Context) error {
 	if e.Concurrency <= 0 {
 		return errors.New("concurrency must be > 0")
@@ -114,9 +126,14 @@ func (e *Engine) Run(ctx context.Context) error {
 		return errors.New("writer is required")
 	}
 
-	totalSize := TotalCIDRSize(e.CIDRs)
-	if totalSize > 1<<24 {
-		return fmt.Errorf("target range too large (%d hosts, max %d); split into smaller ranges", totalSize, 1<<24)
+	ports, err := normalizePorts(e.Ports)
+	if err != nil {
+		return err
+	}
+
+	total := TotalScannableHosts(e.CIDRs, e.Exclude)
+	if total > maxScanHosts {
+		return fmt.Errorf("target range too large (%d hosts, max %d); split into smaller ranges", total, maxScanHosts)
 	}
 
 	ips, err := GenerateIPsMulti(e.CIDRs, e.Exclude)
@@ -128,59 +145,27 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer cancel()
 
 	if e.Reporter != nil {
-		e.Reporter.OnStart(TotalCIDRSize(e.CIDRs))
+		e.Reporter.OnStart(total)
 	}
 
 	jobs := make(chan net.IP, e.Concurrency)
 	resultsWriter := make(chan models.Result, e.Concurrency)
 	var ppsTicket <-chan struct{}
 	if e.PPS > 0 {
-		tickCh := make(chan struct{}, e.PPS)
-		const maxDeficitFactor = 10
-		go func() {
-			start := time.Now()
-			var issued int64
-			ticker := time.NewTicker(5 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					elapsed := time.Since(start)
-					target := int64(elapsed.Seconds() * float64(e.PPS))
-					deficit := target - issued
-					maxDeficit := int64(e.PPS * maxDeficitFactor)
-					if deficit > maxDeficit {
-						deficit = maxDeficit
-						issued = target - maxDeficit
-					}
-					for i := int64(0); i < deficit; i++ {
-						select {
-						case tickCh <- struct{}{}:
-							issued++
-						default:
-							issued++
-						}
-					}
-				}
-			}
-		}()
-		ppsTicket = tickCh
+		ppsTicket = startPacer(ctx, e.PPS)
 	}
 
 	var wg sync.WaitGroup
-	var smbWG sync.WaitGroup
 	var dnsWG sync.WaitGroup
 
 	dnsJobs := make(chan models.Result, e.Concurrency*2)
 
-	for i := 0; i < e.Concurrency/2+1; i++ {
+	for range e.Concurrency/2 + 1 {
 		dnsWG.Add(1)
 		go func() {
 			defer dnsWG.Done()
 			for res := range dnsJobs {
-				res.Hostname = lookupHostname(res.IP)
+				res.Hostname = lookupHostname(ctx, res.IP)
 				if e.Reporter != nil {
 					e.Reporter.OnResult(res)
 				}
@@ -192,15 +177,15 @@ func (e *Engine) Run(ctx context.Context) error {
 		}()
 	}
 
-	for i := 0; i < e.Concurrency; i++ {
+	for range e.Concurrency {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 			for ip := range jobs {
 				if e.Reporter != nil {
 					e.Reporter.OnHostStart(ip.String())
 				}
-				openPorts := scanPorts(ctx, ip.String(), e.Ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(e.Ports)), ppsTicket, e.PacketsSent)
+				openPorts := scanPorts(ctx, ip.String(), ports, e.Timeout, e.Retries, resolvedPortConcurrency(e.PortConcurrency, len(ports)), ppsTicket, e.PacketsSent)
 				if len(openPorts) == 0 {
 					if e.Reporter != nil {
 						e.Reporter.OnHostDone()
@@ -214,25 +199,12 @@ func (e *Engine) Run(ctx context.Context) error {
 					}
 				}
 
-				if e.SMBWriter != nil {
-					for _, p := range openPorts {
-						if p == 445 {
-							smbWG.Add(1)
-							go func(targetIP string) {
-								defer smbWG.Done()
-								EnumSMB(ctx, targetIP, "", e.SMBWriter, e.Timeout)
-							}(ip.String())
-							break
-						}
-					}
-				}
-
 				dnsJobs <- models.Result{
 					IP:    ip.String(),
 					Ports: openPorts,
 				}
 			}
-		}(i)
+		}()
 	}
 
 	var writerWG sync.WaitGroup
@@ -246,35 +218,29 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}()
 
+feed:
 	for ip := range ips {
 		select {
 		case jobs <- ip:
-		case <-ctx.Done():
-			close(jobs)
-			go func() { for range ips {} }()
-			wg.Wait()
-			close(dnsJobs)
-			dnsWG.Wait()
-			close(resultsWriter)
-			writerWG.Wait()
-			smbWG.Wait()
 			if e.Reporter != nil {
-				e.Reporter.OnDone()
+				e.Reporter.OnHostEnqueued()
 			}
-			return nil
-		}
-		if e.Reporter != nil {
-			e.Reporter.OnHostEnqueued()
+		case <-ctx.Done():
+			// Drain the generator so its goroutine can exit.
+			go func() {
+				for range ips {
+				}
+			}()
+			break feed
 		}
 	}
+
 	close(jobs)
 	wg.Wait()
 	close(dnsJobs)
 	dnsWG.Wait()
 	close(resultsWriter)
 	writerWG.Wait()
-
-	smbWG.Wait()
 
 	if e.Reporter != nil {
 		e.Reporter.OnDone()
@@ -286,7 +252,7 @@ func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duratio
 	if len(ports) == 0 {
 		return nil
 	}
-	if portConcurrency <= 0 || portConcurrency == 1 {
+	if portConcurrency <= 1 {
 		open := make([]int, 0)
 		for _, port := range ports {
 			if ScanPort(ctx, ip, port, timeout, retries, ppsTicket, packetsSent) {
@@ -326,8 +292,10 @@ func scanPorts(ctx context.Context, ip string, ports []int, timeout time.Duratio
 	return open
 }
 
-func lookupHostname(ip string) string {
-	addrs, err := net.LookupAddr(ip)
+func lookupHostname(ctx context.Context, ip string) string {
+	ctx, cancel := context.WithTimeout(ctx, dnsTimeout)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupAddr(ctx, ip)
 	if err != nil || len(addrs) == 0 {
 		return ""
 	}

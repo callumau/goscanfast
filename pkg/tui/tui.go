@@ -33,8 +33,8 @@ type Runner struct {
 	enqueued  uint64
 	inFlight  uint64
 	completed uint64
-	alive      uint64
-	found      uint64
+	alive     uint64
+	found     uint64
 
 	rateEMA   float64
 	lastTick  time.Time
@@ -48,15 +48,16 @@ type Runner struct {
 	liveMu    sync.Mutex
 	liveLines []string
 
-	header    *tview.TextView
-	target    *tview.TextView
-	stats     *tview.TextView
-	progress  *tview.TextView
-	ports     *tview.TextView
-	footer    *tview.TextView
+	header   *tview.TextView
+	target   *tview.TextView
+	stats    *tview.TextView
+	progress *tview.TextView
+	ports    *tview.TextView
+	footer   *tview.TextView
 
 	stopOnce    sync.Once
 	done        chan struct{}
+	refreshReq  chan struct{}
 	refreshDone chan struct{}
 	appDone     chan struct{}
 }
@@ -87,7 +88,7 @@ func NewRunner(cfg Config) *Runner {
 
 	r.footer = tview.NewTextView().SetDynamicColors(true)
 	r.footer.SetBorder(false)
-	r.footer.SetText("Legend: q=quit, Ctrl+C=quit, s=kill (instant)")
+	r.footer.SetText("Legend: q=quit, Ctrl+C=quit, s=kill (3s grace)")
 
 	grid := tview.NewGrid()
 	grid.SetRows(6, 5, 7, 0, 1)
@@ -109,12 +110,14 @@ func NewRunner(cfg Config) *Runner {
 			return nil
 		}
 		if event.Rune() == 's' {
+			// Graceful cancel first so results flush; force-exit only if
+			// teardown hangs.
 			if r.config.Cancel != nil {
 				r.config.Cancel()
 			}
 			go func() {
-				r.Stop()
-				os.Exit(0)
+				time.Sleep(3 * time.Second)
+				os.Exit(1)
 			}()
 			return nil
 		}
@@ -131,6 +134,7 @@ func (r *Runner) Reporter() *Reporter {
 func (r *Runner) Start() error {
 	r.lastTick = time.Now()
 	r.done = make(chan struct{})
+	r.refreshReq = make(chan struct{}, 1)
 	r.refreshDone = make(chan struct{})
 	go func() {
 		defer close(r.refreshDone)
@@ -140,6 +144,8 @@ func (r *Runner) Start() error {
 			select {
 			case <-ticker.C:
 				r.updateRate()
+				r.refresh()
+			case <-r.refreshReq:
 				r.refresh()
 			case <-r.done:
 				return
@@ -204,7 +210,12 @@ func (rep *Reporter) OnResult(result models.Result) {
 }
 
 func (rep *Reporter) OnDone() {
-	rep.runner.refresh()
+	// Route through the refresh goroutine: it alone touches rate state,
+	// so this never races the 500ms ticker.
+	select {
+	case rep.runner.refreshReq <- struct{}{}:
+	default:
+	}
 }
 
 func (r *Runner) updateRate() {
@@ -246,6 +257,9 @@ func (r *Runner) updateRate() {
 	r.lastCount = count
 }
 
+// refresh runs on the refresh goroutine only (ticker and refreshReq);
+// all view mutation is queued onto the tview event loop via
+// QueueUpdateDraw, the only goroutine-safe way to touch tview widgets.
 func (r *Runner) refresh() {
 	enqueued := atomic.LoadUint64(&r.enqueued)
 	inFlight := atomic.LoadUint64(&r.inFlight)
@@ -259,37 +273,37 @@ func (r *Runner) refresh() {
 	}
 	queued := queuedCount(enqueued, inFlight, completed)
 
-	r.target.Clear()
-	fmt.Fprintf(r.target, "CIDR  : %s\n", r.config.CIDR)
-	fmt.Fprintf(r.target, "Range : %s - %s\n", r.config.RangeStart, r.config.RangeEnd)
-
-	r.stats.Clear()
-	fmt.Fprintf(r.stats, "Alive : %-6d %s\n", alive, statBar(alive, 10))
-	fmt.Fprintf(r.stats, "Ports : %-6d [Found]\n", found)
-
-	r.progress.Clear()
-	ppsLabel := ""
-	if r.config.PPS > 0 {
-		ppsLabel = fmt.Sprintf("%.0f/%d", r.ppsEMA, r.config.PPS)
-	} else {
-		ppsLabel = fmt.Sprintf("%.0f/unlimited", r.ppsEMA)
-	}
-	fmt.Fprintf(r.progress, "%s %.2f%%\n\n", progressBar(percent, 60), percent)
-	fmt.Fprintf(r.progress, "Queued      : %-8d Rate        : %-14s PPS : %s\n", queued, fmt.Sprintf("%.1f hosts/s", r.rateEMA), ppsLabel)
-	fmt.Fprintf(r.progress, "In Progress : %-8d ETA         : %-14s\n", inFlight, formatETA(total, completed, r.rateEMA))
-	fmt.Fprintf(r.progress, "Completed   : %-8d Concurrency : %d\n", completed, r.config.Concurrency)
-
 	r.liveMu.Lock()
 	lines := make([]string, len(r.liveLines))
 	copy(lines, r.liveLines)
 	r.liveMu.Unlock()
 
-	r.ports.Clear()
-	for _, line := range lines {
-		fmt.Fprintln(r.ports, line)
-	}
+	r.app.QueueUpdateDraw(func() {
+		r.target.Clear()
+		fmt.Fprintf(r.target, "CIDR  : %s\n", r.config.CIDR)
+		fmt.Fprintf(r.target, "Range : %s - %s\n", r.config.RangeStart, r.config.RangeEnd)
 
-	r.app.Draw()
+		r.stats.Clear()
+		fmt.Fprintf(r.stats, "Alive : %-6d %s\n", alive, statBar(alive, 10))
+		fmt.Fprintf(r.stats, "Ports : %-6d [Found]\n", found)
+
+		r.progress.Clear()
+		ppsLabel := ""
+		if r.config.PPS > 0 {
+			ppsLabel = fmt.Sprintf("%.0f/%d", r.ppsEMA, r.config.PPS)
+		} else {
+			ppsLabel = fmt.Sprintf("%.0f/unlimited", r.ppsEMA)
+		}
+		fmt.Fprintf(r.progress, "%s %.2f%%\n\n", progressBar(percent, 60), percent)
+		fmt.Fprintf(r.progress, "Queued      : %-8d Rate        : %-14s PPS : %s\n", queued, fmt.Sprintf("%.1f hosts/s", r.rateEMA), ppsLabel)
+		fmt.Fprintf(r.progress, "In Progress : %-8d ETA         : %-14s\n", inFlight, formatETA(total, completed, r.rateEMA))
+		fmt.Fprintf(r.progress, "Completed   : %-8d Concurrency : %d\n", completed, r.config.Concurrency)
+
+		r.ports.Clear()
+		for _, line := range lines {
+			fmt.Fprintln(r.ports, line)
+		}
+	})
 }
 
 func formatETA(total, completed uint64, rate float64) string {

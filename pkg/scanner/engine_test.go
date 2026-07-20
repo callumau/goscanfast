@@ -21,23 +21,25 @@ func (w *mockWriter) Write(r models.Result) error {
 
 func (w *mockWriter) Close() error { return nil }
 
+// mockReporter counters are atomic: the engine calls Reporter methods
+// concurrently from all worker goroutines.
 type mockReporter struct {
-	startCalls      int
-	hostEnqueued    int
-	hostStartCalls  int
-	hostDoneCalls   int
-	portOpenCalls   int
-	resultCalls     int
-	doneCalls       int
+	startCalls     atomic.Int64
+	hostEnqueued   atomic.Int64
+	hostStartCalls atomic.Int64
+	hostDoneCalls  atomic.Int64
+	portOpenCalls  atomic.Int64
+	resultCalls    atomic.Int64
+	doneCalls      atomic.Int64
 }
 
-func (r *mockReporter) OnStart(total uint64)    { r.startCalls++ }
-func (r *mockReporter) OnHostEnqueued()           { r.hostEnqueued++ }
-func (r *mockReporter) OnHostStart(ip string)     { r.hostStartCalls++ }
-func (r *mockReporter) OnHostDone()               { r.hostDoneCalls++ }
-func (r *mockReporter) OnPortOpen(ip string, p int) { r.portOpenCalls++ }
-func (r *mockReporter) OnResult(res models.Result) { r.resultCalls++ }
-func (r *mockReporter) OnDone()                   { r.doneCalls++ }
+func (r *mockReporter) OnStart(total uint64)        { r.startCalls.Add(1) }
+func (r *mockReporter) OnHostEnqueued()             { r.hostEnqueued.Add(1) }
+func (r *mockReporter) OnHostStart(ip string)       { r.hostStartCalls.Add(1) }
+func (r *mockReporter) OnHostDone()                 { r.hostDoneCalls.Add(1) }
+func (r *mockReporter) OnPortOpen(ip string, p int) { r.portOpenCalls.Add(1) }
+func (r *mockReporter) OnResult(res models.Result)  { r.resultCalls.Add(1) }
+func (r *mockReporter) OnDone()                     { r.doneCalls.Add(1) }
 
 func TestEngine_Run_SmallRange(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -83,11 +85,11 @@ func TestEngine_Run_SmallRange(t *testing.T) {
 		t.Fatalf("expected port %d, got %v", port, writer.results[0].Ports)
 	}
 
-	if reporter.startCalls != 1 {
-		t.Fatalf("expected 1 OnStart call, got %d", reporter.startCalls)
+	if reporter.startCalls.Load() != 1 {
+		t.Fatalf("expected 1 OnStart call, got %d", reporter.startCalls.Load())
 	}
-	if reporter.doneCalls != 1 {
-		t.Fatalf("expected 1 OnDone call, got %d", reporter.doneCalls)
+	if reporter.doneCalls.Load() != 1 {
+		t.Fatalf("expected 1 OnDone call, got %d", reporter.doneCalls.Load())
 	}
 }
 
@@ -111,8 +113,8 @@ func TestEngine_Run_ContextCancel(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if reporter.doneCalls != 1 {
-		t.Fatalf("expected 1 OnDone call, got %d", reporter.doneCalls)
+	if reporter.doneCalls.Load() != 1 {
+		t.Fatalf("expected 1 OnDone call, got %d", reporter.doneCalls.Load())
 	}
 }
 
