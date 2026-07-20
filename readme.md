@@ -45,12 +45,12 @@ GOOS=darwin GOARCH=arm64 go build -o build/goscanfast-darwin-arm64 .
 
 ### Windows
 ```bash
-GOOS=windows GOARCH=amd64 go build -o goscanfast-windows-amd64.exe .
+GOOS=windows GOARCH=amd64 go build -o build/goscanfast-windows-amd64.exe .
 ```
 
 ### macOS (Apple Silicon)
 ```bash
-GOOS=darwin GOARCH=arm64 go build -o goscanfast-darwin-arm64 .
+GOOS=darwin GOARCH=arm64 go build -o build/goscanfast-darwin-arm64 .
 ```
 
 ## Usage
