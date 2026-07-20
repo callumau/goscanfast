@@ -296,7 +296,20 @@ func (r *Runner) refresh() {
 		}
 		fmt.Fprintf(r.progress, "%s %.2f%%\n\n", progressBar(percent, 60), percent)
 		fmt.Fprintf(r.progress, "Queued      : %-8d Rate        : %-14s PPS : %s\n", queued, fmt.Sprintf("%.1f hosts/s", r.rateEMA), ppsLabel)
-		fmt.Fprintf(r.progress, "In Progress : %-8d ETA         : %-14s\n", inFlight, formatETA(total, completed, r.rateEMA))
+		// Prefer a PPS-derived rate for the ETA: the pacer makes packet
+		// throughput steady, whereas host completions arrive in bursts.
+		// Convert pps -> hosts/s using the observed packets-per-host ratio.
+		etaRate := r.rateEMA
+		if r.config.PacketsSent != nil && r.ppsEMA > 0 {
+			started := completed + inFlight
+			if started > 0 {
+				pktsPerHost := float64(r.config.PacketsSent.Load()) / float64(started)
+				if pktsPerHost > 0 {
+					etaRate = r.ppsEMA / pktsPerHost
+				}
+			}
+		}
+		fmt.Fprintf(r.progress, "In Progress : %-8d ETA         : %-14s\n", inFlight, formatETA(total, completed, etaRate))
 		fmt.Fprintf(r.progress, "Completed   : %-8d Concurrency : %d\n", completed, r.config.Concurrency)
 
 		r.ports.Clear()
